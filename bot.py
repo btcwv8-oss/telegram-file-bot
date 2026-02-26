@@ -6,6 +6,7 @@ import qrcode
 import hashlib
 import threading
 import requests
+import mimetypes
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -285,11 +286,12 @@ async def show_file_detail(update, context, short_id):
             created_str = dt.strftime('%Y-%m-%d %H:%M')
         else: created_str = "未知"
 
-        res = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(full_path)
-        long_url = res if isinstance(res, str) else res.get('publicURL', res)
+        # 确保使用最原始的直连链接格式，并添加下载参数
+        long_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET_NAME}/{full_path}"
+        display_url = f"{long_url}?download={filename}"
         
         # 彻底移除短链接，使用原始直连
-        qr = generate_qr(long_url)
+        qr = generate_qr(display_url)
         count = data['file_stats'].get(full_path, 0)
         
         text = (
@@ -298,9 +300,9 @@ async def show_file_detail(update, context, short_id):
             f"⚖️ 大小：`{size}`\n"
             f"📅 上传时间：`{created_str}`\n"
             f"📈 下载次数：`{count}` 次\n\n"
-            f"🔗 [点击下载]({long_url})\n\n"
-            f"链接：`{long_url}`\n"
-            f"（微信扫码后请点击右上角在浏览器打开）"
+            f"🔗 [点击下载]({display_url})\n\n"
+            f"链接：`{display_url}`\n\n"
+            f"💡 *微信用户提示*：\n扫码后请点击屏幕右上角的 **“三个点(...)”** 图标，选择 **“在浏览器打开”** 即可开始下载。"
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏳ 临时链接", callback_data=f"ts:{short_id}"), InlineKeyboardButton("✏️ 重命名", callback_data=f"rn:{short_id}")],
@@ -385,8 +387,20 @@ async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         tg_file = await context.bot.get_file(file_obj.file_id)
         path = await tg_file.download_to_drive()
+        
+        # 自动识别 MIME 类型，防止 APK 变 ZIP
+        mime_type, _ = mimetypes.guess_type(name)
+        if name.endswith('.apk'):
+            mime_type = 'application/vnd.android.package-archive'
+        elif not mime_type:
+            mime_type = 'application/octet-stream'
+            
         with open(path, 'rb') as f: content = f.read()
-        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=name, file=content, file_options={'upsert': 'true'})
+        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(
+            path=name, 
+            file=content, 
+            file_options={'upsert': 'true', 'content-type': mime_type}
+        )
         await show_file_detail(update, context, get_short_id(name))
         if os.path.exists(path): os.remove(path)
     except Exception as e: await update_view(update, context, f"❌ 失败: {e}")
