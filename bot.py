@@ -4,6 +4,7 @@ import asyncio
 import qrcode
 import threading
 import mimetypes
+import urllib.parse
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -17,18 +18,68 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SUPABASE_BUCKET_NAME = "public-files"
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "") # 在 Render 环境变量中设置，例如 https://your-app.onrender.com
 BJ_TZ = timezone(timedelta(hours=8))
 
 logging.basicConfig(level=logging.INFO)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ========== 状态与配置 ==========
-# user_states[user_id] = {"auth": bool, "action": str, "old_name": str, "selected": set()}
 user_states = {}
 bot_config = {"password": os.environ.get("BOT_PASSWORD", "admin")}
 
+# ========== 微信中转引导页 HTML ==========
+GUIDE_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文件下载</title>
+    <style>
+        body {{ font-family: -apple-system, sans-serif; text-align: center; padding-top: 50px; color: #333; }}
+        .weixin-tip {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); color: #fff; z-index: 999; }}
+        .weixin-tip img {{ width: 100%; max-width: 300px; position: absolute; right: 20px; top: 10px; }}
+        .btn {{ display: inline-block; padding: 12px 24px; background: #0088cc; color: #fff; text-decoration: none; border-radius: 8px; margin-top: 20px; }}
+    </style>
+</head>
+<body>
+    <div id="weixinTip" class="weixin-tip">
+        <p style="margin-top: 100px; font-size: 18px;">微信内无法直接下载<br>请点击右上角 •••<br>选择“在浏览器中打开”</p>
+        <img src="https://img.alicdn.com/tfs/TB19S_4QXXXXXbSXXXXXXXXXXXX-1125-1125.png" alt="引导图">
+    </div>
+    <div id="normalView">
+        <h3>正在准备下载...</h3>
+        <p id="fileName"></p>
+        <a id="downloadBtn" class="btn" href="#">手动点击下载</a>
+    </div>
+    <script>
+        var url = new URLSearchParams(window.location.search).get('url');
+        var name = new URLSearchParams(window.location.search).get('name');
+        if (url) {{
+            document.getElementById('downloadBtn').href = url;
+            document.getElementById('fileName').innerText = name || '文件准备就绪';
+            var ua = navigator.userAgent.toLowerCase();
+            if (ua.match(/MicroMessenger/i) == "micromessenger") {{
+                document.getElementById('weixinTip').style.display = 'block';
+            }} else {{
+                window.location.href = url; // 浏览器环境下自动跳转下载
+            }}
+        }}
+    </script>
+</body>
+</html>
+"""
+
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+    def do_GET(self):
+        if self.path.startswith("/dl"):
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(GUIDE_HTML.encode())
+        else:
+            self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
     def log_message(self, *args): pass
 
 # ========== 工具 ==========
@@ -74,7 +125,6 @@ def check_auth(func):
 # ========== 界面 ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    # 保持 auth 状态，只清空其他 action
     if user_id in user_states:
         auth_status = user_states[user_id].get("auth", False)
         user_states[user_id] = {"auth": auth_status}
@@ -130,11 +180,7 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0,
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data; user_id = update.effective_user.id
-    
-    # 基础路由（无需 Auth 的只有返回首页，但首页本身会检查 Auth）
     if data == "back_home": await start(update, context); return
-    
-    # 其他所有 Callback 检查 Auth
     if not user_states.get(user_id, {}).get("auth"):
         await send_or_edit(update, "*会话已过期，请重新输入密码*")
         return
@@ -174,47 +220,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     try:
-        url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET_NAME}/{name}"
-        qr = qrcode.make(url); buf = BytesIO(); qr.save(buf, format='PNG'); buf.seek(0)
-        # 增加等宽代码块包裹的原始链接，方便一键点击复制
-        text = f"`{name}`\n\n🔗 [点击下载]({url})\n\n`{url}`"
+        raw_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET_NAME}/{name}"
+        # 构建中转页链接
+        if RENDER_EXTERNAL_URL:
+            dl_url = f"{RENDER_EXTERNAL_URL}/dl?name={urllib.parse.quote(name)}&url={urllib.parse.quote(raw_url)}"
+        else:
+            dl_url = raw_url
+            
+        qr = qrcode.make(dl_url); buf = BytesIO(); qr.save(buf, format='PNG'); buf.seek(0)
+        text = f"`{name}`\n\n🔗 [点击下载]({dl_url})\n\n`{dl_url}`"
         prefix = name[:40]
         kb = [
             [InlineKeyboardButton("重命名", callback_data=f"rn:{prefix}"), InlineKeyboardButton("删除", callback_data=f"d:{prefix}")],
             [InlineKeyboardButton("返回列表", callback_data="p:0:normal")]
         ]
         await send_or_edit(update, text, reply_markup=InlineKeyboardMarkup(kb), photo=buf)
-    except: pass
+    except Exception as e: logging.error(e)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id; msg = update.message
     if user_id not in user_states: user_states[user_id] = {"auth": False}
     state = user_states[user_id]
     
-    # 1. 优先处理验证逻辑
     if not state.get("auth"):
         if msg.text and msg.text.strip() == bot_config["password"]:
-            state["auth"] = True
-            await start(update, context)
-        else:
-            await send_or_edit(update, "*密码错误，请重新输入*")
+            state["auth"] = True; await start(update, context)
+        else: await send_or_edit(update, "*密码错误，请重新输入*")
         return
 
-    # 2. 已验证，处理正在进行的动作
     if "action" in state:
         if state["action"] == "rename":
             new = msg.text.strip() + os.path.splitext(state["old_name"])[1]
             try: supabase.storage.from_(SUPABASE_BUCKET_NAME).move(state["old_name"], new); await show_detail(update, context, new)
             except: pass
         elif state["action"] == "pwd":
-            bot_config["password"] = msg.text.strip()
-            await start(update, context)
+            bot_config["password"] = msg.text.strip(); await start(update, context)
         state.pop("action", None); await safe_delete(msg); return
     
-    # 3. 处理上传
     file = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
-    if not file: 
-        await safe_delete(msg); return
+    if not file: await safe_delete(msg); return
         
     name = f"photo_{datetime.now(BJ_TZ).strftime('%Y%m%d_%H%M%S')}.jpg" if msg.photo else getattr(file, 'file_name', 'file')
     try:
@@ -230,9 +274,7 @@ def main():
     port = int(os.environ.get("PORT", 8080))
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', port), HealthHandler).serve_forever(), daemon=True).start()
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
+    app.add_handler(CommandHandler("start", start)); app.add_handler(CallbackQueryHandler(handle_callback)); app.add_handler(MessageHandler(filters.ALL, handle_message))
     app.run_polling()
 
 if __name__ == '__main__': main()
