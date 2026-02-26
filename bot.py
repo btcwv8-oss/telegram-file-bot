@@ -213,11 +213,9 @@ async def handle_url_upload(update, context, url):
     try:
         response = requests.get(url, stream=True, timeout=15)
         name = url.split('/')[-1].split('?')[0] or f"web_{datetime.now(BJ_TZ).strftime('%H%M%S')}.html"
-        folder = datetime.now(BJ_TZ).strftime('%Y-%m')
-        full_path = f"{folder}/{name}"
         content = response.content
-        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=full_path, file=content, file_options={'upsert': 'true'})
-        await show_file_detail(update, context, get_short_id(full_path))
+        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=name, file=content, file_options={'upsert': 'true'})
+        await show_file_detail(update, context, get_short_id(name))
     except Exception as e:
         await update_view(update, context, f"❌ 远程转存失败: {e}")
 
@@ -392,15 +390,13 @@ async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_obj = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
     if not file_obj: return
     name = getattr(file_obj, 'file_name', None) or f"img_{datetime.now(BJ_TZ).strftime('%H%M%S')}.jpg"
-    folder = datetime.now(BJ_TZ).strftime('%Y-%m')
-    full_path = f"{folder}/{name}"
     await update_view(update, context, f"⏳ *正在上传*：`{name}`...")
     try:
         tg_file = await context.bot.get_file(file_obj.file_id)
         path = await tg_file.download_to_drive()
         with open(path, 'rb') as f: content = f.read()
-        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=full_path, file=content, file_options={'upsert': 'true'})
-        await show_file_detail(update, context, get_short_id(full_path))
+        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=name, file=content, file_options={'upsert': 'true'})
+        await show_file_detail(update, context, get_short_id(name))
         if os.path.exists(path): os.remove(path)
     except Exception as e: await update_view(update, context, f"❌ 失败: {e}")
 
