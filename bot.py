@@ -27,29 +27,33 @@ logging.basicConfig(level=logging.INFO)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ========== 状态与持久化配置 ==========
-user_states = {}
+user_states = {} # 存放临时 action
 DEFAULT_PWD = "btcwv"
 CONFIG_FILE = ".bot_config.json"
+AUTH_FILE = ".auth_users.json"
 
-def get_remote_config():
+def get_remote_data(filename, default_val):
     try:
-        res = supabase.storage.from_(SUPABASE_BUCKET_NAME).download(CONFIG_FILE)
+        res = supabase.storage.from_(SUPABASE_BUCKET_NAME).download(filename)
         return json.loads(res)
     except:
-        return {"password": DEFAULT_PWD}
+        return default_val
 
-def save_remote_config(config):
+def save_remote_data(filename, data):
     try:
         supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(
-            path=CONFIG_FILE,
-            file=json.dumps(config).encode(),
+            path=filename,
+            file=json.dumps(data).encode(),
             file_options={"upsert": "true", "content-type": "application/json"}
         )
     except Exception as e:
-        logging.error(f"Save config error: {e}")
+        logging.error(f"Save data error for {filename}: {e}")
 
-# ========== 微信中转引导页 HTML (精简链接版本) ==========
-# 这里的 SUPABASE_BASE_URL 会在生成 HTML 时注入
+# 初始加载
+bot_config = get_remote_data(CONFIG_FILE, {"password": DEFAULT_PWD})
+auth_users = get_remote_data(AUTH_FILE, []) # 存储已验证的 user_id 列表
+
+# ========== 微信中转引导页 HTML ==========
 SUPABASE_BASE_URL = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET_NAME}"
 
 GUIDE_HTML_TEMPLATE = """
@@ -90,12 +94,10 @@ GUIDE_HTML_TEMPLATE = """
             if (encodedName) {{
                 var name = atob(encodedName);
                 var url = baseUrl + "/" + encodeURIComponent(name);
-                
                 var btn = document.getElementById('downloadBtn');
                 btn.href = url;
                 btn.setAttribute('download', name);
                 document.getElementById('fileName').innerText = name;
-                
                 var ua = navigator.userAgent.toLowerCase();
                 if (ua.match(/MicroMessenger/i) == "micromessenger") {{
                     document.getElementById('weixinTip').style.display = 'block';
@@ -153,25 +155,27 @@ def find_full_name(prefix):
 def check_auth(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id
-        if not user_states.get(user_id, {}).get("auth"):
-            await send_or_edit(update, "*请发送访问密码以继续*")
-            return
+        global auth_users
+        if user_id not in auth_users:
+            # 实时从云端拉取一次，防止多实例同步问题
+            auth_users = get_remote_data(AUTH_FILE, [])
+            if user_id not in auth_users:
+                await send_or_edit(update, "*请发送访问密码以继续*")
+                return
         return await func(update, context, *args, **kwargs)
     return wrapper
 
 # ========== 界面 ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id in user_states:
-        auth_status = user_states[user_id].get("auth", False)
-        user_states[user_id] = {"auth": auth_status}
-    else:
-        user_states[user_id] = {"auth": False}
-        
-    if not user_states[user_id]["auth"]:
-        await send_or_edit(update, "*请发送访问密码以继续*")
-        return
+    global auth_users
+    if user_id not in auth_users:
+        auth_users = get_remote_data(AUTH_FILE, [])
+        if user_id not in auth_users:
+            await send_or_edit(update, "*请发送访问密码以继续*")
+            return
 
+    user_states[user_id] = {} # 清空 action
     kb = [
         [InlineKeyboardButton("文件列表", callback_data="p:0:normal")],
         [InlineKeyboardButton("批量删除", callback_data="p:0:batch_delete")],
@@ -184,7 +188,7 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0,
     try:
         user_id = update.effective_user.id
         items = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
-        files = [i for i in items if i['name'] != '.emptyFolderPlaceholder' and i['name'] != CONFIG_FILE]
+        files = [i for i in items if i['name'] not in ['.emptyFolderPlaceholder', CONFIG_FILE, AUTH_FILE]]
         files.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         
         if "selected" not in user_states[user_id]: user_states[user_id]["selected"] = set()
@@ -218,9 +222,13 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0,
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data; user_id = update.effective_user.id
     if data == "back_home": await start(update, context); return
-    if not user_states.get(user_id, {}).get("auth"):
-        await send_or_edit(update, "*会话已过期，请重新输入密码*")
-        return
+    
+    global auth_users
+    if user_id not in auth_users:
+        auth_users = get_remote_data(AUTH_FILE, [])
+        if user_id not in auth_users:
+            await send_or_edit(update, "*会话已过期，请重新输入密码*")
+            return
 
     if data.startswith("p:"):
         parts = data.split(":"); await list_files(update, context, page=int(parts[1]), mode=parts[2])
@@ -250,17 +258,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if s: supabase.storage.from_(SUPABASE_BUCKET_NAME).remove(s)
         user_states[user_id].pop("selected", None); await start(update, context)
     elif data == "admin_menu":
-        kb = [[InlineKeyboardButton("修改密码", callback_data="change_pwd")], [InlineKeyboardButton("返回", callback_data="back_home")]]
+        kb = [[InlineKeyboardButton("修改密码", callback_data="change_pwd")], [InlineKeyboardButton("退出登录", callback_data="logout")], [InlineKeyboardButton("返回", callback_data="back_home")]]
         await send_or_edit(update, "*设置*", reply_markup=InlineKeyboardMarkup(kb))
     elif data == "change_pwd":
         user_states[user_id]["action"] = "pwd"; await send_or_edit(update, "输入新密码:")
+    elif data == "logout":
+        if user_id in auth_users:
+            auth_users.remove(user_id)
+            save_remote_data(AUTH_FILE, auth_users)
+        await send_or_edit(update, "*已退出登录*")
 
 async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     try:
-        # 极致精简：只加密文件名
         encoded_name = base64.b64encode(name.encode()).decode()
         dl_url = f"{RENDER_EXTERNAL_URL}/v/s?s={encoded_name}"
-            
         qr = qrcode.make(dl_url); buf = BytesIO(); qr.save(buf, format='PNG'); buf.seek(0)
         text = f"`{name}`\n\n🔗 [点击下载]({dl_url})\n\n`{dl_url}`"
         prefix = name[:40]
@@ -273,25 +284,32 @@ async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id; msg = update.message
-    if user_id not in user_states: user_states[user_id] = {"auth": False}
-    state = user_states[user_id]
+    global auth_users
     
-    if not state.get("auth"):
-        config = get_remote_config()
+    # 1. 验证逻辑
+    if user_id not in auth_users:
+        config = get_remote_data(CONFIG_FILE, {"password": DEFAULT_PWD})
         if msg.text and msg.text.strip() == config.get("password", DEFAULT_PWD):
-            state["auth"] = True; await start(update, context)
+            auth_users.append(user_id)
+            save_remote_data(AUTH_FILE, auth_users)
+            await start(update, context)
         else: await send_or_edit(update, "*密码错误，请重新输入*")
         return
 
+    # 2. 处理 action
+    state = user_states.get(user_id, {})
     if "action" in state:
         if state["action"] == "rename":
             new = msg.text.strip() + os.path.splitext(state["old_name"])[1]
             try: supabase.storage.from_(SUPABASE_BUCKET_NAME).move(state["old_name"], new); await show_detail(update, context, new)
             except: pass
         elif state["action"] == "pwd":
-            new_pwd = msg.text.strip(); save_remote_config({"password": new_pwd}); await start(update, context)
+            new_pwd = msg.text.strip()
+            save_remote_data(CONFIG_FILE, {"password": new_pwd})
+            await start(update, context)
         state.pop("action", None); await safe_delete(msg); return
     
+    # 3. 上传
     file = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
     if not file: await safe_delete(msg); return
         
