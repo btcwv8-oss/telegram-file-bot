@@ -48,7 +48,7 @@ def save_remote_config(config):
     except Exception as e:
         logging.error(f"Save config error: {e}")
 
-# ========== 微信中转引导页 HTML (支持 Base64 解密) ==========
+# ========== 微信中转引导页 HTML (增强 APK 下载支持) ==========
 GUIDE_HTML = """
 <!DOCTYPE html>
 <html>
@@ -73,7 +73,7 @@ GUIDE_HTML = """
     <div class="card" id="normalView">
         <h2 style="margin-bottom: 10px;">资源已就绪</h2>
         <p id="fileName" style="word-break: break-all; color: #666;"></p>
-        <a id="downloadBtn" class="btn" href="#">立即获取资源</a>
+        <a id="downloadBtn" class="btn" href="#" download>立即获取资源</a>
         <p style="font-size: 13px; color: #ff4d4f; margin-top: 15px;">若未自动弹出，请点击上方按钮</p>
     </div>
     <div class="footer">Powered by Resource Assistant</div>
@@ -82,21 +82,23 @@ GUIDE_HTML = """
             return new URLSearchParams(window.location.search).get(name);
         }}
         try {{
-            // 解密混淆的参数
             var rawData = getParam('s');
             if (rawData) {{
                 var decoded = JSON.parse(atob(rawData));
                 var url = decoded.u;
                 var name = decoded.n;
                 
-                document.getElementById('downloadBtn').href = url;
+                var btn = document.getElementById('downloadBtn');
+                btn.href = url;
+                btn.setAttribute('download', name); // 强制设置下载文件名
                 document.getElementById('fileName').innerText = name || '文件准备就绪';
                 
                 var ua = navigator.userAgent.toLowerCase();
                 if (ua.match(/MicroMessenger/i) == "micromessenger") {{
                     document.getElementById('weixinTip').style.display = 'block';
                 }} else {{
-                    setTimeout(function(){ window.location.href = url; }, 500);
+                    // 针对 APK 优化：稍作延迟触发，增加成功率
+                    setTimeout(function(){ window.location.href = url; }, 800);
                 }}
             }}
         }} catch(e) {{ console.error("Parse error"); }}
@@ -107,7 +109,6 @@ GUIDE_HTML = """
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # 混淆路径，不再使用 /dl
         if self.path.startswith("/v/s"):
             self.send_response(200); self.send_header("Content-type", "text/html"); self.end_headers()
             self.wfile.write(GUIDE_HTML.encode())
@@ -254,9 +255,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     try:
         raw_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET_NAME}/{name}"
-        # 混淆参数：将 URL 和文件名封装成 Base64 字符串
         payload = base64.b64encode(json.dumps({"u": raw_url, "n": name}).encode()).decode()
-        # 混淆路径：/v/s
         dl_url = f"{RENDER_EXTERNAL_URL}/v/s?s={payload}"
             
         qr = qrcode.make(dl_url); buf = BytesIO(); qr.save(buf, format='PNG'); buf.seek(0)
@@ -297,6 +296,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         tg_file = await context.bot.get_file(file.file_id); f_path = await tg_file.download_to_drive()
         mtype, _ = mimetypes.guess_type(name)
+        # 针对 APK 强制设置 MIME 类型
+        if name.lower().endswith('.apk'):
+            mtype = 'application/vnd.android.package-archive'
+            
         with open(f_path, 'rb') as f:
             supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=name, file=f.read(), file_options={'upsert':'true', 'content-type': mtype or 'application/octet-stream'})
         await safe_delete(msg); await show_detail(update, context, name)
