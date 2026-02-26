@@ -24,6 +24,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ========== 状态管理 ==========
 user_states = {}
+# 模拟密码存储（实际应用中建议存入数据库或环境变量）
+# 初始密码设为 123456
+bot_config = {"password": "admin"}
 
 # ========== 极简 Web 服务器 (仅用于 Render 保活) ==========
 class HealthHandler(BaseHTTPRequestHandler):
@@ -77,6 +80,7 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0,
             kb.append([InlineKeyboardButton("取消批量模式", callback_data="p:0:normal")])
         else:
             kb.append([InlineKeyboardButton("批量删除", callback_data="p:0:batch_delete")])
+            kb.append([InlineKeyboardButton("管理设置", callback_data="admin_menu")])
             kb.append([InlineKeyboardButton("刷新列表", callback_data="p:0:normal")])
         
         msg_text = text + ("暂无文件" if not files else "")
@@ -139,6 +143,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(1)
         await list_files(update, context)
 
+    elif data == "admin_menu":
+        kb = [
+            [InlineKeyboardButton("修改管理员密码", callback_data="change_pwd")],
+            [InlineKeyboardButton("返回文件列表", callback_data="p:0:normal")]
+        ]
+        await query.edit_message_text("管理员设置中心", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif data == "change_pwd":
+        user_states[user_id] = {"action": "change_password"}
+        await query.message.delete()
+        await update.effective_chat.send_message("请输入新的管理员密码：")
+
 async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     items = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
     f = next((i for i in items if i['name'].startswith(name)), None)
@@ -154,7 +170,6 @@ async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     qr = qrcode.make(long_url)
     buf = BytesIO(); qr.save(buf, format='PNG'); buf.seek(0)
     
-    # 优化界面：将链接放在点击下载超链接下方，移除多余文字
     text = (
         f"文件详情\n\n"
         f"文件名：{full_name}\n"
@@ -206,22 +221,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = user_states.get(user_id)
     
-    if state and state.get("action") == "rename":
-        old_name = state["old_name"]
-        new_base_name = update.message.text.strip()
-        ext = get_file_ext(old_name)
-        new_name = new_base_name + ext
+    if state:
+        action = state.get("action")
+        # 处理重命名逻辑
+        if action == "rename":
+            old_name = state["old_name"]
+            new_base_name = update.message.text.strip()
+            ext = get_file_ext(old_name)
+            new_name = new_base_name + ext
+            try:
+                supabase.storage.from_(SUPABASE_BUCKET_NAME).move(old_name, new_name)
+                user_states.pop(user_id)
+                await update.message.reply_text(f"重命名成功：{new_name}")
+                await show_detail(update, context, new_name)
+            except Exception as e:
+                await update.message.reply_text(f"重命名失败：{e}")
+                user_states.pop(user_id)
+            return
         
-        try:
-            supabase.storage.from_(SUPABASE_BUCKET_NAME).move(old_name, new_name)
+        # 处理修改密码逻辑
+        elif action == "change_password":
+            new_pwd = update.message.text.strip()
+            bot_config["password"] = new_pwd
             user_states.pop(user_id)
-            await update.message.reply_text(f"重命名成功：{new_name}")
-            await show_detail(update, context, new_name)
-        except Exception as e:
-            await update.message.reply_text(f"重命名失败：{e}")
-            user_states.pop(user_id)
-        return
+            await update.message.reply_text(f"管理员密码已成功修改为：{new_pwd}")
+            await list_files(update, context)
+            return
 
+    # 处理文件上传
     msg = update.message
     file = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
     if not file: return
