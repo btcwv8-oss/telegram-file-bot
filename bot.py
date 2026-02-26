@@ -46,6 +46,7 @@ def load_data():
         'password': 'btcwv', 
         'verified_users': [], 
         'file_stats': {}, 
+        'file_pwd': {},   # 取件码存储
         'folders': {}
     }
     try:
@@ -99,7 +100,8 @@ async def update_view(update, context, text, reply_markup=None, photo=None):
 def is_verified(uid, user):
     if user.username and user.username.lower().replace('@','') in [a.lower() for a in ADMIN_USERNAMES]:
         return True
-    return uid in load_data().get('verified_users', [])
+    data = load_data()
+    return uid in data.get('verified_users', [])
 
 def verify_user(uid):
     data = load_data()
@@ -174,6 +176,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception: pass
 
     data = load_data()
+    # 1. 验证全局密码
     if user_data.get(uid, {}).get('waiting_pwd'):
         if text == data.get('password'):
             verify_user(uid)
@@ -183,12 +186,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update_view(update, context, "❌ *密码错误*\n\n请重新输入：")
         return
 
+    # 2. 重命名输入
     if user_data.get(uid, {}).get('waiting_rename'):
         await do_rename(update, context, text)
+        return
+    
+    # 3. 设置取件码输入
+    if user_data.get(uid, {}).get('waiting_file_pwd'):
+        await do_set_file_pwd(update, context, text)
         return
 
     if not is_verified(uid, update.effective_user): return
 
+    # 4. 菜单按键处理
     if text == "📂 文件列表": await send_file_list(update, context)
     elif text == "📤 上传文件": await update_view(update, context, "📤 *请直接发送文件/图片/视频给我*")
     elif text == "🔍 搜索文件": await update_view(update, context, "🔍 *请输入关键词搜索*")
@@ -199,7 +209,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "2️⃣ *远程转存*：发送 HTTP 链接，机器人自动下载并存储。\n"
             "3️⃣ *剪贴板*：发送纯文字，自动存为 `.txt` 笔记。\n"
             "4️⃣ *自动归档*：所有文件自动按 `年-月/` 文件夹分类。\n"
-            "5️⃣ *空间监控*：列表顶部实时显示 1GB 空间占用情况。\n\n"
+            "5️⃣ *取件码*：支持为单个文件设置专属取件密码。\n\n"
             "👤 *管理员指令*：\n"
             "`/setpwd [新密码]` - 修改全局访问密码"
         )
@@ -207,23 +217,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text.startswith("http"):
         await handle_url_upload(update, context, text)
     else:
-        # 默认作为搜索处理，如果搜索无结果则询问是否存为笔记
-        files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
-        matches = [f for f in files if text.lower() in f['name'].lower()]
-        if matches:
-            await send_file_list(update, context, search_query=text)
-        else:
-            await handle_note_upload(update, context, text)
+        # 默认作为搜索处理
+        await send_file_list(update, context, search_query=text)
 
 async def handle_url_upload(update, context, url):
     await update_view(update, context, "⏳ *正在尝试远程转存...*")
     try:
-        response = requests.get(url, stream=True, timeout=10)
+        response = requests.get(url, stream=True, timeout=15)
         name = url.split('/')[-1].split('?')[0] or f"web_{datetime.now(BJ_TZ).strftime('%H%M%S')}.html"
-        # 自动日期归档
         folder = datetime.now(BJ_TZ).strftime('%Y-%m')
         full_path = f"{folder}/{name}"
-        
         content = response.content
         supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=full_path, file=content, file_options={'upsert': 'true'})
         await show_file_detail(update, context, get_short_id(full_path))
@@ -287,6 +290,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith('cd:'): await confirm_delete(update, context, data[3:])
     elif data.startswith('yd:'): await do_delete(update, context, data[3:])
     elif data.startswith('rn:'): await start_rename(update, context, data[3:])
+    elif data.startswith('sp:'): await start_set_file_pwd(update, context, data[3:])
     elif data.startswith('ts:'): await get_temp_link(update, context, data[3:])
     elif data == 'batch_del': await send_batch_del(update, context)
     elif data.startswith('bs:'): await do_batch_del_single(update, context, data[3:])
@@ -313,22 +317,46 @@ async def show_file_detail(update, context, short_id):
         url = res if isinstance(res, str) else res.get('publicURL', res)
         qr = generate_qr(url)
         count = data['file_stats'].get(name, 0)
+        f_pwd = data['file_pwd'].get(name, "无")
         
         text = (
             f"✅ *文件详情*\n\n"
             f"📄 *文件名*：`{name}`\n"
             f"⚖️ *大小*：`{size}`\n"
             f"📅 *上传时间*：`{created_str}`\n"
-            f"📈 *下载次数*：`{count}` 次\n\n"
+            f"📈 *下载次数*：`{count}` 次\n"
+            f"🔐 *取件码*：`{f_pwd}`\n\n"
             f"🔗 [点击下载]({url})\n\n"
             f"链接：`{url}`"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏳ 临时链接(1h)", callback_data=f"ts:{short_id}"), InlineKeyboardButton("✏️ 重命名", callback_data=f"rn:{short_id}")],
-            [InlineKeyboardButton("🗑️ 删除", callback_data=f"cd:{short_id}"), InlineKeyboardButton("🔙 返回列表", callback_data="list_files")]
+            [InlineKeyboardButton("⏳ 临时链接(1h)", callback_data=f"ts:{short_id}"), InlineKeyboardButton("🔐 设取件码", callback_data=f"sp:{short_id}")],
+            [InlineKeyboardButton("✏️ 重命名", callback_data=f"rn:{short_id}"), InlineKeyboardButton("🗑️ 删除", callback_data=f"cd:{short_id}")],
+            [InlineKeyboardButton("🔙 返回列表", callback_data="list_files")]
         ])
         await update_view(update, context, text, reply_markup=kb, photo=qr)
     except Exception as e: await update_view(update, context, f"❌ 获取详情失败: {e}")
+
+async def start_set_file_pwd(update, context, short_id):
+    name = callback_map.get(short_id)
+    uid = update.effective_user.id
+    user_data[uid].update({'waiting_file_pwd': True, 'target_file': name})
+    await update_view(update, context, f"🔐 *设置取件码*：`{name}`\n\n请输入新取件码（发送 /none 清除，/cancel 取消）：")
+
+async def do_set_file_pwd(update, context, pwd):
+    uid = update.effective_user.id
+    name = user_data[uid].get('target_file')
+    user_data[uid]['waiting_file_pwd'] = False
+    if pwd.lower() == '/cancel':
+        await show_file_detail(update, context, get_short_id(name))
+        return
+    data = load_data()
+    if pwd.lower() == '/none':
+        if name in data['file_pwd']: del data['file_pwd'][name]
+    else:
+        data['file_pwd'][name] = pwd
+    save_data(data)
+    await show_file_detail(update, context, get_short_id(name))
 
 async def get_temp_link(update, context, short_id):
     name = callback_map.get(short_id)
@@ -357,8 +385,8 @@ async def do_rename(update, context, new_name):
         supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=new_name, file=file_data, file_options={'upsert': 'true'})
         supabase.storage.from_(SUPABASE_BUCKET_NAME).remove([old_name])
         data = load_data()
-        if old_name in data['file_stats']:
-            data['file_stats'][new_name] = data['file_stats'].pop(old_name)
+        if old_name in data['file_stats']: data['file_stats'][new_name] = data['file_stats'].pop(old_name)
+        if old_name in data['file_pwd']: data['file_pwd'][new_name] = data['file_pwd'].pop(old_name)
         save_data(data)
         await send_file_list(update, context)
     except Exception: await update_view(update, context, "❌ 重命名失败")
@@ -374,6 +402,7 @@ async def do_delete(update, context, short_id):
         supabase.storage.from_(SUPABASE_BUCKET_NAME).remove([name])
         data = load_data()
         if name in data['file_stats']: del data['file_stats'][name]
+        if name in data['file_pwd']: del data['file_pwd'][name]
         save_data(data)
     await send_file_list(update, context)
 
@@ -402,7 +431,6 @@ async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_obj = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
     if not file_obj: return
     name = getattr(file_obj, 'file_name', None) or f"img_{datetime.now(BJ_TZ).strftime('%H%M%S')}.jpg"
-    # 自动日期归档
     folder = datetime.now(BJ_TZ).strftime('%Y-%m')
     full_path = f"{folder}/{name}"
     await update_view(update, context, f"⏳ *正在上传*：`{name}`...")
