@@ -321,8 +321,12 @@ async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         path = await tg_file.download_to_drive()
         with open(path, 'rb') as f: content = f.read()
         supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=name, file=content, file_options={'upsert': 'true'})
-        url = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(name)
-        await update_view(update, context, f"✅ *上传成功*\n`{name}`", photo=generate_qr(url), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📂 查看列表", callback_data='list_files')]]))
+        
+        # 上传成功后，直接调用 show_file_detail 的逻辑来显示完整详情
+        # 我们需要先获取文件的 short_id
+        short_id = get_short_id(name)
+        await show_file_detail(update, context, short_id)
+        
         if os.path.exists(path): os.remove(path)
     except Exception as e: await update_view(update, context, f"❌ 失败: {e}")
 
