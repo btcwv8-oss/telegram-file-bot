@@ -108,19 +108,12 @@ def verify_user(uid):
 # ========== 辅助函数 ==========
 def format_size(size_bytes):
     if not size_bytes: return "0 B"
-    size_bytes = int(size_bytes)
-    if size_bytes < 1024: return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024: return f"{size_bytes / 1024:.1f} KB"
-    else: return f"{size_bytes / (1024 * 1024):.1f} MB"
-
-def get_short_url(long_url):
     try:
-        api_url = f"http://tinyurl.com/api-create.php?url={requests.utils.quote(long_url, safe=':/')}"
-        res = requests.get(api_url, timeout=5)
-        if res.status_code == 200:
-            return res.text
-    except Exception: pass
-    return long_url
+        size_bytes = int(size_bytes)
+        if size_bytes < 1024: return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024: return f"{size_bytes / 1024:.1f} KB"
+        else: return f"{size_bytes / (1024 * 1024):.1f} MB"
+    except: return "未知"
 
 def generate_qr(url):
     qr = qrcode.QRCode(version=1, box_size=10, border=4)
@@ -133,7 +126,6 @@ def generate_qr(url):
     return buf
 
 def get_all_files():
-    """递归获取所有文件，包括子文件夹"""
     all_files = []
     def _list_dir(path=""):
         try:
@@ -142,13 +134,12 @@ def get_all_files():
                 name = item.get('name')
                 if not name or name == '.emptyFolderPlaceholder': continue
                 full_path = f"{path}/{name}" if path else name
-                if item.get('id') is None: # 这是一个文件夹
+                if item.get('id') is None:
                     _list_dir(full_path)
                 else:
                     item['full_path'] = full_path
                     all_files.append(item)
-        except Exception as e:
-            logging.error(f"List dir error at {path}: {e}")
+        except Exception: pass
     _list_dir()
     return all_files
 
@@ -225,7 +216,10 @@ async def send_file_list(update, context, page=0, search_query=None):
         if search_query:
             real_files = [f for f in real_files if search_query.lower() in f['full_path'].lower()]
 
-        total_size = sum(int(f.get('metadata', {}).get('size') or f.get('size', 0)) for f in real_files)
+        total_size = 0
+        for f in real_files:
+            total_size += int(f.get('metadata', {}).get('size') or f.get('size', 0))
+            
         percent = (total_size / (1024 * 1024 * 1024)) * 100
         storage_info = f"📊 *存储统计*：{format_size(total_size)} / 1 GB ({percent:.1f}%)"
 
@@ -239,7 +233,6 @@ async def send_file_list(update, context, page=0, search_query=None):
         
         text = f"{storage_info}\n\n📂 *文件列表* ({len(real_files)}个)\n━━━━━━━━━━━━━━━"
         kb = []
-        # 按时间倒序排列
         real_files.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         for f in real_files[page*page_size : (page+1)*page_size]:
             full_path = f['full_path']
@@ -278,7 +271,6 @@ async def show_file_detail(update, context, short_id):
     data['file_stats'][full_path] = data['file_stats'].get(full_path, 0) + 1
     save_data(data)
     try:
-        # 获取单个文件详情
         path_parts = full_path.split('/')
         folder = "/".join(path_parts[:-1]) if len(path_parts) > 1 else ""
         filename = path_parts[-1]
@@ -296,8 +288,8 @@ async def show_file_detail(update, context, short_id):
         res = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(full_path)
         long_url = res if isinstance(res, str) else res.get('publicURL', res)
         
-        short_url = get_short_url(long_url)
-        qr = generate_qr(short_url)
+        # 恢复直连，不再使用短链接中转
+        qr = generate_qr(long_url)
         count = data['file_stats'].get(full_path, 0)
         
         text = (
@@ -306,8 +298,8 @@ async def show_file_detail(update, context, short_id):
             f"⚖️ 大小：`{size}`\n"
             f"📅 上传时间：`{created_str}`\n"
             f"📈 下载次数：`{count}` 次\n\n"
-            f"🔗 [点击下载]({short_url})\n\n"
-            f"短链接：`{short_url}`\n"
+            f"🔗 [点击下载]({long_url})\n\n"
+            f"链接：`{long_url}`\n"
             f"（微信扫码后请点击右上角在浏览器打开）"
         )
         kb = InlineKeyboardMarkup([
@@ -322,9 +314,8 @@ async def get_temp_link(update, context, short_id):
     try:
         res = supabase.storage.from_(SUPABASE_BUCKET_NAME).create_signed_url(full_path, 3600)
         temp_url = res.get('signedURL', res) if isinstance(res, dict) else res
-        short_temp_url = get_short_url(temp_url)
-        await update.callback_query.answer("✅ 已生成 1 小时有效短链接", show_alert=True)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⏳ *临时分享链接 (1小时有效)*：\n\n`{short_temp_url}`", parse_mode='Markdown')
+        await update.callback_query.answer("✅ 已生成 1 小时有效链接", show_alert=True)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⏳ *临时分享链接 (1小时有效)*：\n\n`{temp_url}`", parse_mode='Markdown')
     except Exception as e: await update.callback_query.answer(f"❌ 生成失败: {e}", show_alert=True)
 
 async def start_rename(update, context, short_id):
