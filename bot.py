@@ -23,7 +23,6 @@ logging.basicConfig(level=logging.INFO)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ========== 状态管理 ==========
-# user_states[user_id] = {"selected": set(), "action": str, "old_name": str, "page": int}
 user_states = {}
 bot_config = {"password": "admin"}
 
@@ -61,9 +60,7 @@ async def send_or_edit(update: Update, text, reply_markup=None, photo=None):
         else:
             return await update.effective_chat.send_message(text=text, reply_markup=reply_markup, parse_mode='Markdown', disable_web_page_preview=True)
 
-# ========== 核心逻辑：获取完整文件名 ==========
 def find_full_name(prefix):
-    """根据截断的前缀找回完整文件名"""
     try:
         items = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
         for i in items:
@@ -108,7 +105,6 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0,
         kb = []
         for f in files[page*8 : (page+1)*8]:
             name = f['name']
-            # Callback data 限制 64 字节，前缀取 40 字节足够匹配
             prefix = name[:40]
             if mode == "batch_delete":
                 mark = "✅ " if name in selected else "⬜️ "
@@ -195,7 +191,6 @@ async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, full_n
         qr = qrcode.make(long_url)
         buf = BytesIO(); qr.save(buf, format='PNG'); buf.seek(0)
         
-        # 修正 Markdown 语法，确保链接完整且可点
         text = (
             f"*文件详情*\n\n"
             f"文件名：`{full_name}`\n"
@@ -251,7 +246,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await start(update, context)
             return
 
-    # 上传处理
     msg = update.message
     file = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
     if not file: return
