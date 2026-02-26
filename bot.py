@@ -17,8 +17,6 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SUPABASE_BUCKET_NAME = "public-files"
-# 管理员名单，优先从环境变量读取，否则使用默认值
-ADMIN_USERNAMES = os.environ.get("ADMIN_USERNAMES", "btcwv,LDvipa").split(",")
 BJ_TZ = timezone(timedelta(hours=8))
 
 logging.basicConfig(level=logging.INFO)
@@ -30,25 +28,10 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
     def log_message(self, *args): pass
 
-# ========== 权限验证装饰器 ==========
-def admin_only(func):
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        user = update.effective_user
-        if not user or user.username not in ADMIN_USERNAMES:
-            msg = "抱歉，您没有权限使用此机器人。"
-            if update.callback_query:
-                await update.callback_query.answer(msg, show_alert=True)
-            else:
-                await update.message.reply_text(msg)
-            return
-        return await func(update, context, *args, **kwargs)
-    return wrapper
-
 # ========== 机器人逻辑 ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("你好！直接发送文件即可上传，发送 /list 查看列表。", reply_markup=ReplyKeyboardRemove())
 
-@admin_only
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
     try:
         items = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
@@ -87,19 +70,17 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0)
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
     data = query.data
     if data.startswith("p:"): await list_files(update, context, page=int(data[2:]))
     elif data.startswith("v:"): await show_detail(update, context, data[2:])
     elif data.startswith("d:"): await delete_file(update, context, data[2:])
 
-@admin_only
 async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     items = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
     # 模糊匹配文件名（处理 callback_data 截断的情况）
     f = next((i for i in items if i['name'].startswith(name)), None)
-    if not f: 
-        if update.callback_query: await update.callback_query.answer("文件不存在", show_alert=True)
-        return
+    if not f: return
     
     full_name = f['name']
     size_raw = int(f.get('metadata', {}).get('size', 0))
@@ -129,7 +110,6 @@ async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     else:
         await update.effective_chat.send_photo(photo=buf, caption=text, reply_markup=InlineKeyboardMarkup(kb))
 
-@admin_only
 async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     items = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
     f = next((i for i in items if i['name'].startswith(name)), None)
@@ -139,15 +119,13 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
         # 如果是图片消息，直接删除并发送新消息告知结果
         if update.callback_query.message.photo:
             await update.callback_query.message.delete()
-            status_msg = await update.effective_chat.send_message(f"已删除文件：{full_name}")
+            await update.effective_chat.send_message(f"已删除文件：{full_name}")
         else:
             await update.callback_query.edit_message_text(f"已删除文件：{full_name}")
-            status_msg = update.callback_query.message
         
         await asyncio.sleep(1)
         await list_files(update, context)
 
-@admin_only
 async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     file = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
