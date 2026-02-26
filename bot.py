@@ -5,6 +5,7 @@ import qrcode
 import threading
 import mimetypes
 import urllib.parse
+import json
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -18,15 +19,34 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SUPABASE_BUCKET_NAME = "public-files"
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "") # 在 Render 环境变量中设置，例如 https://your-app.onrender.com
+# 硬编码服务地址，确保微信中转功能直接可用
+RENDER_EXTERNAL_URL = "https://telegram-file-bot-free.onrender.com"
 BJ_TZ = timezone(timedelta(hours=8))
 
 logging.basicConfig(level=logging.INFO)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ========== 状态与配置 ==========
+# ========== 状态与持久化配置 ==========
 user_states = {}
-bot_config = {"password": os.environ.get("BOT_PASSWORD", "admin")}
+DEFAULT_PWD = "btcwv"
+CONFIG_FILE = ".bot_config.json"
+
+def get_remote_config():
+    try:
+        res = supabase.storage.from_(SUPABASE_BUCKET_NAME).download(CONFIG_FILE)
+        return json.loads(res)
+    except:
+        return {"password": DEFAULT_PWD}
+
+def save_remote_config(config):
+    try:
+        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(
+            path=CONFIG_FILE,
+            file=json.dumps(config).encode(),
+            file_options={"upsert": "true", "content-type": "application/json"}
+        )
+    except Exception as e:
+        logging.error(f"Save config error: {e}")
 
 # ========== 微信中转引导页 HTML ==========
 GUIDE_HTML = """
@@ -37,33 +57,38 @@ GUIDE_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>文件下载</title>
     <style>
-        body {{ font-family: -apple-system, sans-serif; text-align: center; padding-top: 50px; color: #333; }}
-        .weixin-tip {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); color: #fff; z-index: 999; }}
-        .weixin-tip img {{ width: 100%; max-width: 300px; position: absolute; right: 20px; top: 10px; }}
-        .btn {{ display: inline-block; padding: 12px 24px; background: #0088cc; color: #fff; text-decoration: none; border-radius: 8px; margin-top: 20px; }}
+        body {{ font-family: -apple-system, sans-serif; text-align: center; padding-top: 50px; color: #333; background: #f5f5f5; }}
+        .weixin-tip {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); color: #fff; z-index: 999; }}
+        .weixin-tip img {{ width: 100%; max-width: 250px; position: absolute; right: 20px; top: 10px; }}
+        .card {{ background: #fff; margin: 20px; padding: 30px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
+        .btn {{ display: inline-block; padding: 15px 30px; background: #0088cc; color: #fff; text-decoration: none; border-radius: 10px; font-weight: bold; margin-top: 20px; }}
+        .footer {{ font-size: 12px; color: #999; margin-top: 50px; }}
     </style>
 </head>
 <body>
     <div id="weixinTip" class="weixin-tip">
-        <p style="margin-top: 100px; font-size: 18px;">微信内无法直接下载<br>请点击右上角 •••<br>选择“在浏览器中打开”</p>
+        <p style="margin-top: 120px; font-size: 20px; font-weight: bold; line-height: 1.6;">微信内无法直接下载<br>请点击右上角 <span style="font-size: 24px;">•••</span><br>选择“在浏览器中打开”</p>
         <img src="https://img.alicdn.com/tfs/TB19S_4QXXXXXbSXXXXXXXXXXXX-1125-1125.png" alt="引导图">
     </div>
-    <div id="normalView">
-        <h3>正在准备下载...</h3>
-        <p id="fileName"></p>
-        <a id="downloadBtn" class="btn" href="#">手动点击下载</a>
+    <div class="card" id="normalView">
+        <h2 style="margin-bottom: 10px;">文件准备就绪</h2>
+        <p id="fileName" style="word-break: break-all; color: #666;"></p>
+        <a id="downloadBtn" class="btn" href="#">立即开始下载</a>
+        <p style="font-size: 13px; color: #ff4d4f; margin-top: 15px;">若未自动弹出下载，请点击上方按钮</p>
     </div>
+    <div class="footer">Powered by File Bot</div>
     <script>
-        var url = new URLSearchParams(window.location.search).get('url');
-        var name = new URLSearchParams(window.location.search).get('name');
+        var params = new URLSearchParams(window.location.search);
+        var url = params.get('url');
+        var name = params.get('name');
         if (url) {{
             document.getElementById('downloadBtn').href = url;
-            document.getElementById('fileName').innerText = name || '文件准备就绪';
+            document.getElementById('fileName').innerText = name || '未知文件';
             var ua = navigator.userAgent.toLowerCase();
             if (ua.match(/MicroMessenger/i) == "micromessenger") {{
                 document.getElementById('weixinTip').style.display = 'block';
             }} else {{
-                window.location.href = url; // 浏览器环境下自动跳转下载
+                setTimeout(function(){ window.location.href = url; }, 500);
             }}
         }}
     </script>
@@ -74,9 +99,7 @@ GUIDE_HTML = """
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/dl"):
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
+            self.send_response(200); self.send_header("Content-type", "text/html"); self.end_headers()
             self.wfile.write(GUIDE_HTML.encode())
         else:
             self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
@@ -147,7 +170,7 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0,
     try:
         user_id = update.effective_user.id
         items = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
-        files = [i for i in items if i['name'] != '.emptyFolderPlaceholder']
+        files = [i for i in items if i['name'] != '.emptyFolderPlaceholder' and i['name'] != CONFIG_FILE]
         files.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         
         if "selected" not in user_states[user_id]: user_states[user_id]["selected"] = set()
@@ -221,11 +244,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     try:
         raw_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET_NAME}/{name}"
-        # 构建中转页链接
-        if RENDER_EXTERNAL_URL:
-            dl_url = f"{RENDER_EXTERNAL_URL}/dl?name={urllib.parse.quote(name)}&url={urllib.parse.quote(raw_url)}"
-        else:
-            dl_url = raw_url
+        dl_url = f"{RENDER_EXTERNAL_URL}/dl?name={urllib.parse.quote(name)}&url={urllib.parse.quote(raw_url)}"
             
         qr = qrcode.make(dl_url); buf = BytesIO(); qr.save(buf, format='PNG'); buf.seek(0)
         text = f"`{name}`\n\n🔗 [点击下载]({dl_url})\n\n`{dl_url}`"
@@ -242,21 +261,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in user_states: user_states[user_id] = {"auth": False}
     state = user_states[user_id]
     
+    # 1. 优先处理验证逻辑
     if not state.get("auth"):
-        if msg.text and msg.text.strip() == bot_config["password"]:
+        config = get_remote_config()
+        if msg.text and msg.text.strip() == config.get("password", DEFAULT_PWD):
             state["auth"] = True; await start(update, context)
         else: await send_or_edit(update, "*密码错误，请重新输入*")
         return
 
+    # 2. 已验证，处理正在进行的动作
     if "action" in state:
         if state["action"] == "rename":
             new = msg.text.strip() + os.path.splitext(state["old_name"])[1]
             try: supabase.storage.from_(SUPABASE_BUCKET_NAME).move(state["old_name"], new); await show_detail(update, context, new)
             except: pass
         elif state["action"] == "pwd":
-            bot_config["password"] = msg.text.strip(); await start(update, context)
+            new_pwd = msg.text.strip()
+            save_remote_config({"password": new_pwd})
+            await start(update, context)
         state.pop("action", None); await safe_delete(msg); return
     
+    # 3. 处理上传
     file = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
     if not file: await safe_delete(msg); return
         
