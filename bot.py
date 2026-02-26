@@ -5,6 +5,7 @@ import asyncio
 import qrcode
 import hashlib
 import threading
+import requests
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -44,14 +45,13 @@ def load_data():
     default = {
         'password': 'btcwv', 
         'verified_users': [], 
-        'file_stats': {}, # {file_name: download_count}
-        'folders': {}     # {file_name: folder_name}
+        'file_stats': {}, 
+        'folders': {}
     }
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # 确保所有键都存在
                 for k, v in default.items():
                     if k not in data: data[k] = v
                 return data
@@ -62,7 +62,6 @@ def save_data(data):
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-# 内存缓存
 user_data = {} 
 callback_map = {} 
 
@@ -146,7 +145,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_view(update, context, "🔐 *访问受限*\n\n请输入访问密码：")
         return
 
-    text = "👋 *你好！我是文件助手*\n\n请选择操作或直接发送文件上传 👇"
+    text = "👋 *你好！我是您的私人云端助手*\n\n您可以直接发送文件、链接或文字给我 👇"
     kb = ReplyKeyboardMarkup([
         [KeyboardButton("📂 文件列表"), KeyboardButton("📤 上传文件")],
         [KeyboardButton("🔍 搜索文件"), KeyboardButton("ℹ️ 帮助")]
@@ -155,16 +154,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data.setdefault(uid, {})['mid'] = new_msg.message_id
 
 async def set_pwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
     user = update.effective_user
     if not (user.username and user.username.lower().replace('@','') in [a.lower() for a in ADMIN_USERNAMES]):
         await update.message.reply_text("❌ 只有管理员可以修改密码")
         return
-    
     if not context.args:
         await update.message.reply_text("📝 使用方法：`/setpwd 新密码`")
         return
-    
     new_pwd = context.args[0]
     data = load_data()
     data['password'] = new_pwd
@@ -190,43 +186,74 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_data.get(uid, {}).get('waiting_rename'):
         await do_rename(update, context, text)
         return
-    
-
 
     if not is_verified(uid, update.effective_user): return
 
     if text == "📂 文件列表": await send_file_list(update, context)
     elif text == "📤 上传文件": await update_view(update, context, "📤 *请直接发送文件/图片/视频给我*")
-    elif text == "🔍 搜索文件": await update_view(update, context, "🔍 *请输入关键词搜索*\n例如：直接发送文件名关键词")
+    elif text == "🔍 搜索文件": await update_view(update, context, "🔍 *请输入关键词搜索*")
     elif text == "ℹ️ 帮助": 
         help_text = (
-            "📖 *使用说明*\n\n"
-            "1️⃣ *上传*：直接发送任何文件、图片或视频。\n"
-            "2️⃣ *管理*：点击“文件列表”查看、重命名或删除文件。\n"
-            "3️⃣ *分享*：点击文件可获取下载链接和二维码。\n"
-            "4️⃣ *统计*：列表顶部实时显示存储占用情况。\n"
-            "5️⃣ *安全*：支持为单个文件设置提取码。\n\n"
+            "📖 *私人云盘使用说明*\n\n"
+            "1️⃣ *直接上传*：发送文件、图片、视频即可存入云端。\n"
+            "2️⃣ *远程转存*：发送 HTTP 链接，机器人自动下载并存储。\n"
+            "3️⃣ *剪贴板*：发送纯文字，自动存为 `.txt` 笔记。\n"
+            "4️⃣ *自动归档*：所有文件自动按 `年-月/` 文件夹分类。\n"
+            "5️⃣ *空间监控*：列表顶部实时显示 1GB 空间占用情况。\n\n"
             "👤 *管理员指令*：\n"
-            "`/setpwd [新密码]` - 修改访问密码"
+            "`/setpwd [新密码]` - 修改全局访问密码"
         )
         await update_view(update, context, help_text)
+    elif text.startswith("http"):
+        await handle_url_upload(update, context, text)
     else:
-        # 默认作为搜索处理
-        await send_file_list(update, context, search_query=text)
+        # 默认作为搜索处理，如果搜索无结果则询问是否存为笔记
+        files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
+        matches = [f for f in files if text.lower() in f['name'].lower()]
+        if matches:
+            await send_file_list(update, context, search_query=text)
+        else:
+            await handle_note_upload(update, context, text)
+
+async def handle_url_upload(update, context, url):
+    await update_view(update, context, "⏳ *正在尝试远程转存...*")
+    try:
+        response = requests.get(url, stream=True, timeout=10)
+        name = url.split('/')[-1].split('?')[0] or f"web_{datetime.now(BJ_TZ).strftime('%H%M%S')}.html"
+        # 自动日期归档
+        folder = datetime.now(BJ_TZ).strftime('%Y-%m')
+        full_path = f"{folder}/{name}"
+        
+        content = response.content
+        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=full_path, file=content, file_options={'upsert': 'true'})
+        await show_file_detail(update, context, get_short_id(full_path))
+    except Exception as e:
+        await update_view(update, context, f"❌ 远程转存失败: {e}")
+
+async def handle_note_upload(update, context, text):
+    folder = datetime.now(BJ_TZ).strftime('%Y-%m')
+    name = f"note_{datetime.now(BJ_TZ).strftime('%d_%H%M%S')}.txt"
+    full_path = f"{folder}/{name}"
+    try:
+        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=full_path, file=text.encode('utf-8'), file_options={'upsert': 'true'})
+        await update_view(update, context, f"📝 *已存为笔记*：`{name}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📂 查看详情", callback_data=f"lk:{get_short_id(full_path)}")]]))
+    except Exception as e:
+        await update_view(update, context, f"❌ 笔记保存失败: {e}")
 
 async def send_file_list(update, context, page=0, search_query=None):
     try:
         files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
         real_files = [f for f in files if f.get('name') != '.emptyFolderPlaceholder']
-        
         if search_query:
             real_files = [f for f in real_files if search_query.lower() in f['name'].lower()]
 
         total_size = sum(f.get('metadata', {}).get('size', 0) for f in real_files)
-        storage_info = f"📊 *存储统计*：{format_size(total_size)} / 1 GB"
+        percent = (total_size / (1024 * 1024 * 1024)) * 100
+        warning = "⚠️ *空间告急！*" if percent > 80 else ""
+        storage_info = f"📊 *存储统计*：{format_size(total_size)} / 1 GB ({percent:.1f}%) {warning}"
 
         if not real_files:
-            await update_view(update, context, f"{storage_info}\n\n📭 *暂无匹配文件*")
+            await update_view(update, context, f"{storage_info}\n\n📭 *暂无文件*")
             return
 
         page_size = 6
@@ -254,14 +281,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    
     if data == 'list_files': await send_file_list(update, context)
     elif data.startswith('pg:'): await send_file_list(update, context, page=int(data[3:]))
     elif data.startswith('lk:'): await show_file_detail(update, context, data[3:])
     elif data.startswith('cd:'): await confirm_delete(update, context, data[3:])
     elif data.startswith('yd:'): await do_delete(update, context, data[3:])
     elif data.startswith('rn:'): await start_rename(update, context, data[3:])
-
     elif data.startswith('ts:'): await get_temp_link(update, context, data[3:])
     elif data == 'batch_del': await send_batch_del(update, context)
     elif data.startswith('bs:'): await do_batch_del_single(update, context, data[3:])
@@ -271,12 +296,9 @@ async def show_file_detail(update, context, short_id):
     if not name:
         await update_view(update, context, "❌ 链接失效，请返回列表刷新")
         return
-    
     data = load_data()
-    # 增加下载统计
     data['file_stats'][name] = data['file_stats'].get(name, 0) + 1
     save_data(data)
-    
     try:
         files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
         file_info = next((f for f in files if f['name'] == name), {})
@@ -290,7 +312,6 @@ async def show_file_detail(update, context, short_id):
         res = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(name)
         url = res if isinstance(res, str) else res.get('publicURL', res)
         qr = generate_qr(url)
-        
         count = data['file_stats'].get(name, 0)
         
         text = (
@@ -312,14 +333,11 @@ async def show_file_detail(update, context, short_id):
 async def get_temp_link(update, context, short_id):
     name = callback_map.get(short_id)
     try:
-        # 生成 1 小时有效的签名链接
         res = supabase.storage.from_(SUPABASE_BUCKET_NAME).create_signed_url(name, 3600)
         temp_url = res.get('signedURL', res) if isinstance(res, dict) else res
         await update.callback_query.answer("✅ 已生成 1 小时有效链接", show_alert=True)
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⏳ *临时分享链接 (1小时有效)*：\n\n`{temp_url}`", parse_mode='Markdown')
     except Exception as e: await update.callback_query.answer(f"❌ 生成失败: {e}", show_alert=True)
-
-
 
 async def start_rename(update, context, short_id):
     name = callback_map.get(short_id)
@@ -338,11 +356,9 @@ async def do_rename(update, context, new_name):
         file_data = supabase.storage.from_(SUPABASE_BUCKET_NAME).download(old_name)
         supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=new_name, file=file_data, file_options={'upsert': 'true'})
         supabase.storage.from_(SUPABASE_BUCKET_NAME).remove([old_name])
-        # 同步更新本地数据
         data = load_data()
         if old_name in data['file_stats']:
             data['file_stats'][new_name] = data['file_stats'].pop(old_name)
-
         save_data(data)
         await send_file_list(update, context)
     except Exception: await update_view(update, context, "❌ 重命名失败")
@@ -358,7 +374,6 @@ async def do_delete(update, context, short_id):
         supabase.storage.from_(SUPABASE_BUCKET_NAME).remove([name])
         data = load_data()
         if name in data['file_stats']: del data['file_stats'][name]
-
         save_data(data)
     await send_file_list(update, context)
 
@@ -384,19 +399,19 @@ async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     try: await msg.delete()
     except Exception: pass
-    
     file_obj = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
     if not file_obj: return
-    
-    name = getattr(file_obj, 'file_name', None) or f"img_{datetime.now(BJ_TZ).strftime('%m%d_%H%M%S')}.jpg"
+    name = getattr(file_obj, 'file_name', None) or f"img_{datetime.now(BJ_TZ).strftime('%H%M%S')}.jpg"
+    # 自动日期归档
+    folder = datetime.now(BJ_TZ).strftime('%Y-%m')
+    full_path = f"{folder}/{name}"
     await update_view(update, context, f"⏳ *正在上传*：`{name}`...")
-    
     try:
         tg_file = await context.bot.get_file(file_obj.file_id)
         path = await tg_file.download_to_drive()
         with open(path, 'rb') as f: content = f.read()
-        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=name, file=content, file_options={'upsert': 'true'})
-        await show_file_detail(update, context, get_short_id(name))
+        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=full_path, file=content, file_options={'upsert': 'true'})
+        await show_file_detail(update, context, get_short_id(full_path))
         if os.path.exists(path): os.remove(path)
     except Exception as e: await update_view(update, context, f"❌ 失败: {e}")
 
