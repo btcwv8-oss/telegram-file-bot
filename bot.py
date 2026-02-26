@@ -36,6 +36,10 @@ async def safe_delete(message):
 
 async def send_or_edit(update: Update, text, reply_markup=None, photo=None):
     query = update.callback_query
+    # 尝试删除触发此操作的用户消息（如果是通过指令触发）
+    if update.message:
+        await safe_delete(update.message)
+        
     if query:
         if photo:
             await safe_delete(query.message)
@@ -165,7 +169,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states.pop(user_id, None); await safe_delete(msg); return
     
     file = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
-    if not file: return
+    if not file: 
+        # 如果不是文件也不是正在进行的动作，直接删除用户的杂乱消息（如乱发的文字）
+        await safe_delete(msg)
+        return
+        
     name = f"photo_{datetime.now(BJ_TZ).strftime('%Y%m%d_%H%M%S')}.jpg" if msg.photo else getattr(file, 'file_name', 'file')
     try:
         tg_file = await context.bot.get_file(file.file_id); f_path = await tg_file.download_to_drive()
