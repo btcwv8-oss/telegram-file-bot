@@ -94,6 +94,7 @@ async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
         f"文件名：{full_name}\n"
         f"大小：{size}\n"
         f"上传时间：{time_str}\n\n"
+        f"点击下载：[点击此处]({long_url})\n\n"
         f"链接：{long_url}"
     )
     kb = [[InlineKeyboardButton("删除文件", callback_data=f"d:{full_name[:50]}")], [InlineKeyboardButton("返回列表", callback_data="p:0")]]
