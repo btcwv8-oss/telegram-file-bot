@@ -65,7 +65,8 @@ async def update_view(update, context, text, reply_markup=None, photo=None):
     old_mid = user_data.get(uid, {}).get('mid')
     
     if photo:
-        if old_mid: await safe_delete(context, chat_id, old_mid)
+        # 强制删除旧消息，发送带图片的新消息
+        await safe_delete(context, chat_id, old_mid)
         new_msg = await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=text, reply_markup=reply_markup, parse_mode='Markdown')
         user_data.setdefault(uid, {})['mid'] = new_msg.message_id
     else:
@@ -240,15 +241,14 @@ async def show_file_detail(update, context, short_id):
         # 生成二维码
         qr = generate_qr(url)
         
-        # 构建消息文本，确保包含超链接和原始链接
+        # 构建消息文本，采用用户要求的简洁格式
         text = (
+            f"✅ *上传成功*\n\n"
             f"📄 *文件名*：`{name}`\n"
             f"⚖️ *大小*：`{size}`\n"
             f"📅 *上传时间*：`{created_str}`\n\n"
-            f"📥 *下载方式*：\n"
-            f"1️⃣ [点击此处直接下载]({url})\n"
-            f"2️⃣ 扫描下方二维码下载\n\n"
-            f"🔗 *原始链接*：\n`{url}`"
+            f"🔗 [点击下载]({url})\n\n"
+            f"链接：`{url}`"
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✏️ 重命名", callback_data=f"rn:{short_id}"), InlineKeyboardButton("🗑️ 删除", callback_data=f"cd:{short_id}")],
