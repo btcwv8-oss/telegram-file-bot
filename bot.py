@@ -60,14 +60,10 @@ async def safe_delete(context, chat_id, message_id):
     except Exception: pass
 
 async def update_view(update, context, text, reply_markup=None, photo=None):
-    """稳健的界面更新逻辑"""
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
-    
-    # 尝试获取旧的主消息ID
     old_mid = user_data.get(uid, {}).get('mid')
     
-    # 如果有图片，或者明确需要发送新消息
     if photo:
         if old_mid: await safe_delete(context, chat_id, old_mid)
         new_msg = await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -79,7 +75,6 @@ async def update_view(update, context, text, reply_markup=None, photo=None):
             else:
                 raise Exception("No old message")
         except Exception:
-            # 编辑失败则发送新消息
             new_msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode='Markdown')
             user_data.setdefault(uid, {})['mid'] = new_msg.message_id
 
@@ -104,11 +99,38 @@ def verify_user(uid):
         auth['verified_users'].append(uid)
         with open(AUTH_FILE, 'w') as f: json.dump(auth, f)
 
+# ========== 辅助函数 ==========
+
+def get_file_icon(name):
+    ext = name.split('.')[-1].lower() if '.' in name else ''
+    if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']: return "🖼️"
+    if ext in ['mp4', 'mov', 'avi', 'mkv']: return "🎬"
+    if ext in ['mp3', 'wav', 'flac']: return "🎵"
+    if ext in ['pdf', 'doc', 'docx', 'txt']: return "📄"
+    if ext in ['zip', 'rar', '7z']: return "📦"
+    if ext in ['apk', 'exe']: return "⚙️"
+    return "📁"
+
+def format_size(size_bytes):
+    if not size_bytes: return "0 B"
+    if size_bytes < 1024: return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024: return f"{size_bytes / 1024:.1f} KB"
+    else: return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+def generate_qr(url):
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data(url)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white")
+    buf = BytesIO()
+    qr_img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
+
 # ========== 业务逻辑 ==========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    # 尝试删除用户的指令消息
     try: await update.message.delete()
     except Exception: pass
 
@@ -119,7 +141,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "👋 *你好！我是文件助手*\n\n请选择操作或直接发送文件上传 👇"
     kb = ReplyKeyboardMarkup([[KeyboardButton("📂 文件列表"), KeyboardButton("📤 上传文件")], [KeyboardButton("🔍 搜索文件"), KeyboardButton("ℹ️ 帮助")]], resize_keyboard=True)
-    # 第一次启动建议发送带菜单的消息
     new_msg = await update.message.reply_text(text, reply_markup=kb, parse_mode='Markdown')
     user_data.setdefault(uid, {})['mid'] = new_msg.message_id
 
@@ -153,19 +174,24 @@ async def send_file_list(update, context, page=0):
     try:
         files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
         real_files = [f for f in files if f.get('name') != '.emptyFolderPlaceholder']
+        
+        total_size = sum(f.get('metadata', {}).get('size', 0) for f in real_files)
+        storage_info = f"📊 *存储统计*：{format_size(total_size)} / 1 GB"
+
         if not real_files:
-            await update_view(update, context, "📭 *暂无文件*")
+            await update_view(update, context, f"{storage_info}\n\n📭 *暂无文件*")
             return
 
         page_size = 6
         total_pages = (len(real_files) + page_size - 1) // page_size
         page = max(0, min(page, total_pages - 1))
         
-        text = f"📂 *文件列表* ({len(real_files)}个)\n━━━━━━━━━━━━━━━"
+        text = f"{storage_info}\n\n📂 *文件列表* ({len(real_files)}个)\n━━━━━━━━━━━━━━━"
         kb = []
         for f in real_files[page*page_size : (page+1)*page_size]:
             name = f['name']
-            kb.append([InlineKeyboardButton(f"📄 {name[:30]}", callback_data=f"lk:{get_short_id(name)}")])
+            icon = get_file_icon(name)
+            kb.append([InlineKeyboardButton(f"{icon} {name[:25]}", callback_data=f"lk:{get_short_id(name)}")])
 
         nav = []
         if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data=f"pg:{page-1}"))
@@ -196,14 +222,31 @@ async def show_file_detail(update, context, short_id):
     if not name:
         await update_view(update, context, "❌ 链接失效，请返回列表刷新")
         return
-    url = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(name)
-    qr = generate_qr(url)
-    text = f"📄 *文件名*：`{name}`\n\n🔗 [点击下载]({url})\n\n链接：`{url}`"
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ 重命名", callback_data=f"rn:{short_id}"), InlineKeyboardButton("🗑️ 删除", callback_data=f"cd:{short_id}")],
-        [InlineKeyboardButton("🔙 返回列表", callback_data="list_files")]
-    ])
-    await update_view(update, context, text, reply_markup=kb, photo=qr)
+    try:
+        files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
+        file_info = next((f for f in files if f['name'] == name), {})
+        size = format_size(file_info.get('metadata', {}).get('size', 0))
+        created = file_info.get('created_at', '')
+        if created:
+            dt = datetime.fromisoformat(created.replace('Z', '+00:00')).astimezone(BJ_TZ)
+            created_str = dt.strftime('%Y-%m-%d %H:%M')
+        else: created_str = "未知"
+
+        url = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(name)
+        qr = generate_qr(url)
+        text = (
+            f"📄 *文件名*：`{name}`\n"
+            f"⚖️ *大小*：`{size}`\n"
+            f"📅 *上传时间*：`{created_str}`\n\n"
+            f"🔗 [点击下载]({url})\n\n"
+            f"链接：`{url}`"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ 重命名", callback_data=f"rn:{short_id}"), InlineKeyboardButton("🗑️ 删除", callback_data=f"cd:{short_id}")],
+            [InlineKeyboardButton("🔙 返回列表", callback_data="list_files")]
+        ])
+        await update_view(update, context, text, reply_markup=kb, photo=qr)
+    except Exception as e: await update_view(update, context, f"❌ 获取详情失败: {e}")
 
 async def start_rename(update, context, short_id):
     name = callback_map.get(short_id)
@@ -236,13 +279,15 @@ async def do_delete(update, context, short_id):
     await send_file_list(update, context)
 
 async def send_batch_del(update, context):
-    files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
-    real_files = [f for f in files if f.get('name') != '.emptyFolderPlaceholder']
-    kb = []
-    for f in real_files[:10]:
-        kb.append([InlineKeyboardButton(f"🗑 {f['name'][:30]}", callback_data=f"bs:{get_short_id(f['name'])}")])
-    kb.append([InlineKeyboardButton("🔙 返回", callback_data="list_files")])
-    await update_view(update, context, "🧹 *批量删除模式*", reply_markup=InlineKeyboardMarkup(kb))
+    try:
+        files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
+        real_files = [f for f in files if f.get('name') != '.emptyFolderPlaceholder']
+        kb = []
+        for f in real_files[:10]:
+            kb.append([InlineKeyboardButton(f"🗑 {f['name'][:30]}", callback_data=f"bs:{get_short_id(f['name'])}")])
+        kb.append([InlineKeyboardButton("🔙 返回", callback_data="list_files")])
+        await update_view(update, context, "🧹 *批量删除模式*\n点击下方按钮立即删除文件：", reply_markup=InlineKeyboardMarkup(kb))
+    except Exception: pass
 
 async def do_batch_del_single(update, context, short_id):
     name = callback_map.get(short_id)
