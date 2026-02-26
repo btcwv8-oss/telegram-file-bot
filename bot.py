@@ -288,7 +288,7 @@ async def show_file_detail(update, context, short_id):
         res = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(full_path)
         long_url = res if isinstance(res, str) else res.get('publicURL', res)
         
-        # 恢复直连，不再使用短链接中转
+        # 彻底移除短链接，使用原始直连
         qr = generate_qr(long_url)
         count = data['file_stats'].get(full_path, 0)
         
