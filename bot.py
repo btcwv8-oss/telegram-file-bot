@@ -42,31 +42,19 @@ async def safe_delete(message):
     except Exception:
         pass
 
-# ========== 核心逻辑：单窗口发送/编辑 ==========
 async def send_or_edit(update: Update, text, reply_markup=None, photo=None):
-    """
-    统一的消息处理函数，尽可能维持单窗口体验。
-    如果当前是 CallbackQuery，尝试编辑；如果是新消息或需要切换类型（文字转图片），则删除旧的发送新的。
-    """
     query = update.callback_query
-    chat_id = update.effective_chat.id
-    
     if query:
-        # 如果有图片要发
         if photo:
             await safe_delete(query.message)
             return await update.effective_chat.send_photo(photo=photo, caption=text, reply_markup=reply_markup)
         else:
-            # 如果原消息是图片，现在要发文字，必须删了重发
             if query.message.photo:
                 await safe_delete(query.message)
                 return await update.effective_chat.send_message(text=text, reply_markup=reply_markup)
             else:
-                # 都是文字，直接编辑
                 return await query.edit_message_text(text=text, reply_markup=reply_markup)
     else:
-        # 用户发送了新消息（如 /list 或上传文件），删除用户发送的消息以保持整洁（可选，但这里先保留用户消息）
-        # 发送新窗口前，如果能记录并删除上一个窗口会更好，但这里简单处理为发送新消息
         if photo:
             return await update.effective_chat.send_photo(photo=photo, caption=text, reply_markup=reply_markup)
         else:
@@ -74,7 +62,14 @@ async def send_or_edit(update: Update, text, reply_markup=None, photo=None):
 
 # ========== 机器人功能 ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("你好！直接发送文件即可上传，发送 /list 查看列表。", reply_markup=ReplyKeyboardRemove())
+    # 首页：统一显示所有功能按键
+    text = "你好！欢迎使用文件机器人。\n直接发送文件即可上传，或通过下方按键进行管理。"
+    kb = [
+        [InlineKeyboardButton("查看文件列表", callback_data="p:0:normal")],
+        [InlineKeyboardButton("批量删除模式", callback_data="p:0:batch_delete")],
+        [InlineKeyboardButton("管理员设置", callback_data="admin_menu")]
+    ]
+    await send_or_edit(update, text, reply_markup=InlineKeyboardMarkup(kb))
 
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0, mode="normal"):
     try:
@@ -111,11 +106,10 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0,
         
         if mode == "batch_delete":
             kb.append([InlineKeyboardButton("确认删除已选", callback_data="confirm_batch")])
-            kb.append([InlineKeyboardButton("取消批量模式", callback_data="p:0:normal")])
+            kb.append([InlineKeyboardButton("返回首页", callback_data="back_home")])
         else:
-            kb.append([InlineKeyboardButton("批量删除", callback_data="p:0:batch_delete")])
-            kb.append([InlineKeyboardButton("管理设置", callback_data="admin_menu")])
-            kb.append([InlineKeyboardButton("刷新列表", callback_data="p:0:normal")])
+            kb.append([InlineKeyboardButton("刷新列表", callback_data=f"p:{page}:normal")])
+            kb.append([InlineKeyboardButton("返回首页", callback_data="back_home")])
         
         msg_text = text + ("暂无文件" if not files else "")
         await send_or_edit(update, msg_text, reply_markup=InlineKeyboardMarkup(kb))
@@ -127,11 +121,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = update.effective_user.id
 
-    if data.startswith("p:"):
+    if data == "back_home":
+        if user_id in user_states: user_states.pop(user_id)
+        await start(update, context)
+    elif data.startswith("p:"):
         parts = data.split(":")
         page = int(parts[1])
         mode = parts[2] if len(parts) > 2 else "normal"
-        if mode == "normal" and user_id in user_states: user_states.pop(user_id)
         await list_files(update, context, page=page, mode=mode)
     elif data.startswith("v:"):
         await show_detail(update, context, data[2:])
@@ -159,9 +155,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.effective_chat.send_message(f"已批量删除 {len(selected)} 个文件")
         await asyncio.sleep(1)
         await msg.delete()
-        await list_files(update, context)
+        await start(update, context)
     elif data == "admin_menu":
-        kb = [[InlineKeyboardButton("修改管理员密码", callback_data="change_pwd")], [InlineKeyboardButton("返回列表", callback_data="p:0:normal")]]
+        kb = [[InlineKeyboardButton("修改管理员密码", callback_data="change_pwd")], [InlineKeyboardButton("返回首页", callback_data="back_home")]]
         await send_or_edit(update, "管理员设置中心", reply_markup=InlineKeyboardMarkup(kb))
     elif data == "change_pwd":
         user_states[user_id] = {"action": "change_password"}
@@ -182,7 +178,7 @@ async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     buf = BytesIO(); qr.save(buf, format='PNG'); buf.seek(0)
     
     text = f"文件详情\n\n文件名：{full_name}\n大小：{size}\n上传时间：{time_str}\n\n点击下载：[点击此处]({long_url})\n{long_url}"
-    kb = [[InlineKeyboardButton("重命名", callback_data=f"rn:{full_name[:50]}")], [InlineKeyboardButton("删除文件", callback_data=f"d:{full_name[:50]}")], [InlineKeyboardButton("返回列表", callback_data="p:0:normal")]]
+    kb = [[InlineKeyboardButton("重命名", callback_data=f"rn:{full_name[:50]}")], [InlineKeyboardButton("删除文件", callback_data=f"d:{full_name[:50]}")], [InlineKeyboardButton("返回列表", callback_data="p:0:normal")], [InlineKeyboardButton("返回首页", callback_data="back_home")]]
     await send_or_edit(update, text, reply_markup=InlineKeyboardMarkup(kb), photo=buf)
 
 async def request_rename(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
@@ -202,7 +198,7 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
         msg = await update.effective_chat.send_message(f"已删除：{full_name}")
         await asyncio.sleep(1)
         await msg.delete()
-        await list_files(update, context)
+        await start(update, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -216,7 +212,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 supabase.storage.from_(SUPABASE_BUCKET_NAME).move(old_name, new_name)
                 user_states.pop(user_id)
-                await update.message.delete() # 删除用户的输入
+                await update.message.delete()
                 await show_detail(update, context, new_name)
             except Exception as e:
                 await update.message.reply_text(f"失败：{e}")
@@ -226,10 +222,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_config["password"] = update.message.text.strip()
             user_states.pop(user_id)
             await update.message.delete()
-            await list_files(update, context)
+            await start(update, context)
             return
 
-    # 上传逻辑
     msg = update.message
     file = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
     if not file: return
@@ -243,7 +238,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(f_path, 'rb') as f:
             supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=name, file=f.read(), file_options={'upsert':'true', 'content-type': mtype or 'application/octet-stream'})
         await status_msg.delete()
-        await update.message.delete() # 上传后删除用户的原始文件消息，保持窗口唯一
+        await update.message.delete()
         await show_detail(update, context, name)
         if os.path.exists(f_path): os.remove(f_path)
     except Exception as e: await status_msg.edit_text(f"失败：{e}")
