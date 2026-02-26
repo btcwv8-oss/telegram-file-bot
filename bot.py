@@ -115,8 +115,7 @@ def format_size(size_bytes):
 
 def get_short_url(long_url):
     try:
-        # 使用 tinyurl 免费 API
-        api_url = f"http://tinyurl.com/api-create.php?url={long_url}"
+        api_url = f"http://tinyurl.com/api-create.php?url={requests.utils.quote(long_url, safe=':/')}"
         res = requests.get(api_url, timeout=5)
         if res.status_code == 200:
             return res.text
@@ -132,6 +131,26 @@ def generate_qr(url):
     qr_img.save(buf, format='PNG')
     buf.seek(0)
     return buf
+
+def get_all_files():
+    """递归获取所有文件，包括子文件夹"""
+    all_files = []
+    def _list_dir(path=""):
+        try:
+            items = supabase.storage.from_(SUPABASE_BUCKET_NAME).list(path)
+            for item in items:
+                name = item.get('name')
+                if not name or name == '.emptyFolderPlaceholder': continue
+                full_path = f"{path}/{name}" if path else name
+                if item.get('id') is None: # 这是一个文件夹
+                    _list_dir(full_path)
+                else:
+                    item['full_path'] = full_path
+                    all_files.append(item)
+        except Exception as e:
+            logging.error(f"List dir error at {path}: {e}")
+    _list_dir()
+    return all_files
 
 # ========== 业务逻辑 ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -204,10 +223,9 @@ async def handle_url_upload(update, context, url):
 
 async def send_file_list(update, context, page=0, search_query=None):
     try:
-        files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
-        real_files = [f for f in files if f.get('name') != '.emptyFolderPlaceholder']
+        real_files = get_all_files()
         if search_query:
-            real_files = [f for f in real_files if search_query.lower() in f['name'].lower()]
+            real_files = [f for f in real_files if search_query.lower() in f['full_path'].lower()]
 
         total_size = sum(int(f.get('metadata', {}).get('size') or f.get('size', 0)) for f in real_files)
         percent = (total_size / (1024 * 1024 * 1024)) * 100
@@ -223,9 +241,11 @@ async def send_file_list(update, context, page=0, search_query=None):
         
         text = f"{storage_info}\n\n📂 *文件列表* ({len(real_files)}个)\n━━━━━━━━━━━━━━━"
         kb = []
+        # 按时间倒序排列
+        real_files.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         for f in real_files[page*page_size : (page+1)*page_size]:
-            name = f['name']
-            kb.append([InlineKeyboardButton(name[:35], callback_data=f"lk:{get_short_id(name)}")])
+            full_path = f['full_path']
+            kb.append([InlineKeyboardButton(full_path[:35], callback_data=f"lk:{get_short_id(full_path)}")])
 
         nav = []
         if page > 0: nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"pg:{page-1}"))
@@ -252,16 +272,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith('bs:'): await do_batch_del_single(update, context, data[3:])
 
 async def show_file_detail(update, context, short_id):
-    name = callback_map.get(short_id)
-    if not name:
+    full_path = callback_map.get(short_id)
+    if not full_path:
         await update_view(update, context, "❌ 链接失效，请返回列表刷新")
         return
     data = load_data()
-    data['file_stats'][name] = data['file_stats'].get(name, 0) + 1
+    data['file_stats'][full_path] = data['file_stats'].get(full_path, 0) + 1
     save_data(data)
     try:
-        files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
-        file_info = next((f for f in files if f['name'] == name), {})
+        # 获取单个文件详情
+        path_parts = full_path.split('/')
+        folder = "/".join(path_parts[:-1]) if len(path_parts) > 1 else ""
+        filename = path_parts[-1]
+        files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list(folder)
+        file_info = next((f for f in files if f['name'] == filename), {})
+        
         raw_size = file_info.get('metadata', {}).get('size') or file_info.get('size', 0)
         size = format_size(raw_size)
         created = file_info.get('created_at', '')
@@ -270,17 +295,16 @@ async def show_file_detail(update, context, short_id):
             created_str = dt.strftime('%Y-%m-%d %H:%M')
         else: created_str = "未知"
 
-        res = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(name)
+        res = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(full_path)
         long_url = res if isinstance(res, str) else res.get('publicURL', res)
         
-        # 生成短链接以优化微信扫码
         short_url = get_short_url(long_url)
         qr = generate_qr(short_url)
-        count = data['file_stats'].get(name, 0)
+        count = data['file_stats'].get(full_path, 0)
         
         text = (
             f"✅ *文件详情*\n\n"
-            f"📄 文件名：`{name}`\n"
+            f"📄 文件名：`{full_path}`\n"
             f"⚖️ 大小：`{size}`\n"
             f"📅 上传时间：`{created_str}`\n"
             f"📈 下载次数：`{count}` 次\n\n"
@@ -296,9 +320,9 @@ async def show_file_detail(update, context, short_id):
     except Exception as e: await update_view(update, context, f"❌ 获取详情失败: {e}")
 
 async def get_temp_link(update, context, short_id):
-    name = callback_map.get(short_id)
+    full_path = callback_map.get(short_id)
     try:
-        res = supabase.storage.from_(SUPABASE_BUCKET_NAME).create_signed_url(name, 3600)
+        res = supabase.storage.from_(SUPABASE_BUCKET_NAME).create_signed_url(full_path, 3600)
         temp_url = res.get('signedURL', res) if isinstance(res, dict) else res
         short_temp_url = get_short_url(temp_url)
         await update.callback_query.answer("✅ 已生成 1 小时有效短链接", show_alert=True)
@@ -306,10 +330,10 @@ async def get_temp_link(update, context, short_id):
     except Exception as e: await update.callback_query.answer(f"❌ 生成失败: {e}", show_alert=True)
 
 async def start_rename(update, context, short_id):
-    name = callback_map.get(short_id)
+    full_path = callback_map.get(short_id)
     uid = update.effective_user.id
-    user_data[uid].update({'waiting_rename': True, 'old_name': name})
-    await update_view(update, context, f"✏️ *重命名*：`{name}`\n\n请输入新名称：")
+    user_data[uid].update({'waiting_rename': True, 'old_name': full_path})
+    await update_view(update, context, f"✏️ *重命名*：`{full_path}`\n\n请输入新路径/名称：")
 
 async def do_rename(update, context, new_name):
     uid = update.effective_user.id
@@ -329,33 +353,34 @@ async def do_rename(update, context, new_name):
     except Exception: await update_view(update, context, "❌ 重命名失败")
 
 async def confirm_delete(update, context, short_id):
-    name = callback_map.get(short_id)
+    full_path = callback_map.get(short_id)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ 确认删除", callback_data=f"yd:{short_id}"), InlineKeyboardButton("❌ 取消", callback_data="list_files")]])
-    await update_view(update, context, f"⚠️ *确认删除？*\n`{name}`", reply_markup=kb)
+    await update_view(update, context, f"⚠️ *确认删除？*\n`{full_path}`", reply_markup=kb)
 
 async def do_delete(update, context, short_id):
-    name = callback_map.get(short_id)
-    if name: 
-        supabase.storage.from_(SUPABASE_BUCKET_NAME).remove([name])
+    full_path = callback_map.get(short_id)
+    if full_path: 
+        supabase.storage.from_(SUPABASE_BUCKET_NAME).remove([full_path])
         data = load_data()
-        if name in data['file_stats']: del data['file_stats'][name]
+        if full_path in data['file_stats']: del data['file_stats'][full_path]
         save_data(data)
     await send_file_list(update, context)
 
 async def send_batch_del(update, context):
     try:
-        files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
-        real_files = [f for f in files if f.get('name') != '.emptyFolderPlaceholder']
+        real_files = get_all_files()
+        real_files.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         kb = []
         for f in real_files[:10]:
-            kb.append([InlineKeyboardButton(f"🗑 {f['name'][:30]}", callback_data=f"bs:{get_short_id(f['name'])}")])
+            full_path = f['full_path']
+            kb.append([InlineKeyboardButton(f"🗑 {full_path[:30]}", callback_data=f"bs:{get_short_id(full_path)}")])
         kb.append([InlineKeyboardButton("🔙 返回", callback_data="list_files")])
         await update_view(update, context, "🧹 *批量删除模式*\n点击下方按钮立即删除文件：", reply_markup=InlineKeyboardMarkup(kb))
     except Exception: pass
 
 async def do_batch_del_single(update, context, short_id):
-    name = callback_map.get(short_id)
-    if name: supabase.storage.from_(SUPABASE_BUCKET_NAME).remove([name])
+    full_path = callback_map.get(short_id)
+    if full_path: supabase.storage.from_(SUPABASE_BUCKET_NAME).remove([full_path])
     await send_batch_del(update, context)
 
 async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
