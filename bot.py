@@ -254,3 +254,5 @@ def main():
     app.run_polling()
 
 if __name__ == '__main__': main()
+
+# Trigger redeploy: 2026-02-27 16:05
