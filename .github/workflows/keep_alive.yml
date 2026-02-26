@@ -1,0 +1,13 @@
+name: Keep Alive Render
+on:
+  schedule:
+    - cron: '*/10 * * * *' # 每 10 分钟运行一次
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render Web Service
+        run: |
+          curl -s -o /dev/null -w "%{http_code}" https://telegram-file-bot-free.onrender.com
