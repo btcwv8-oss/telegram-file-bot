@@ -232,14 +232,23 @@ async def show_file_detail(update, context, short_id):
             created_str = dt.strftime('%Y-%m-%d %H:%M')
         else: created_str = "未知"
 
-        url = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(name)
+        # 获取公共链接
+        res = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(name)
+        # 兼容不同版本的 supabase-py 返回格式
+        url = res if isinstance(res, str) else res.get('publicURL', res)
+        
+        # 生成二维码
         qr = generate_qr(url)
+        
+        # 构建消息文本，确保包含超链接和原始链接
         text = (
             f"📄 *文件名*：`{name}`\n"
             f"⚖️ *大小*：`{size}`\n"
             f"📅 *上传时间*：`{created_str}`\n\n"
-            f"🔗 [点击下载]({url})\n\n"
-            f"链接：`{url}`"
+            f"📥 *下载方式*：\n"
+            f"1️⃣ [点击此处直接下载]({url})\n"
+            f"2️⃣ 扫描下方二维码下载\n\n"
+            f"🔗 *原始链接*：\n`{url}`"
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✏️ 重命名", callback_data=f"rn:{short_id}"), InlineKeyboardButton("🗑️ 删除", callback_data=f"cd:{short_id}")],
