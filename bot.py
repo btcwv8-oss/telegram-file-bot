@@ -14,9 +14,7 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    BotCommand,
-    ReplyKeyboardMarkup,
-    KeyboardButton
+    ReplyKeyboardRemove
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -46,8 +44,7 @@ def load_data():
         'password': 'btcwv', 
         'verified_users': [], 
         'file_stats': {}, 
-        'file_pwd': {},   # 取件码存储
-        'folders': {}
+        'file_pwd': {}
     }
     try:
         if os.path.exists(DATA_FILE):
@@ -110,16 +107,6 @@ def verify_user(uid):
         save_data(data)
 
 # ========== 辅助函数 ==========
-def get_file_icon(name):
-    ext = name.split('.')[-1].lower() if '.' in name else ''
-    if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']: return "🖼️"
-    if ext in ['mp4', 'mov', 'avi', 'mkv']: return "🎬"
-    if ext in ['mp3', 'wav', 'flac']: return "🎵"
-    if ext in ['pdf', 'doc', 'docx', 'txt']: return "📄"
-    if ext in ['zip', 'rar', '7z']: return "📦"
-    if ext in ['apk', 'exe']: return "⚙️"
-    return "📁"
-
 def format_size(size_bytes):
     if not size_bytes: return "0 B"
     if size_bytes < 1024: return f"{size_bytes} B"
@@ -147,12 +134,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_view(update, context, "🔐 *访问受限*\n\n请输入访问密码：")
         return
 
-    text = "👋 *你好！我是您的私人云端助手*\n\n您可以直接发送文件、链接或文字给我 👇"
-    kb = ReplyKeyboardMarkup([
-        [KeyboardButton("📂 文件列表"), KeyboardButton("📤 上传文件")],
-        [KeyboardButton("🔍 搜索文件"), KeyboardButton("ℹ️ 帮助")]
-    ], resize_keyboard=True)
-    new_msg = await update.message.reply_text(text, reply_markup=kb, parse_mode='Markdown')
+    text = "👋 *你好！我是您的私人云端助手*\n\n发送 /list 查看文件列表\n直接发送文件或链接进行上传"
+    # 移除旧的菜单栏
+    new_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
     user_data.setdefault(uid, {})['mid'] = new_msg.message_id
 
 async def set_pwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -176,7 +160,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception: pass
 
     data = load_data()
-    # 1. 验证全局密码
     if user_data.get(uid, {}).get('waiting_pwd'):
         if text == data.get('password'):
             verify_user(uid)
@@ -186,35 +169,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update_view(update, context, "❌ *密码错误*\n\n请重新输入：")
         return
 
-    # 2. 重命名输入
     if user_data.get(uid, {}).get('waiting_rename'):
         await do_rename(update, context, text)
         return
     
-    # 3. 设置取件码输入
     if user_data.get(uid, {}).get('waiting_file_pwd'):
         await do_set_file_pwd(update, context, text)
         return
 
     if not is_verified(uid, update.effective_user): return
 
-    # 4. 菜单按键处理
-    if text == "📂 文件列表": await send_file_list(update, context)
-    elif text == "📤 上传文件": await update_view(update, context, "📤 *请直接发送文件/图片/视频给我*")
-    elif text == "🔍 搜索文件": await update_view(update, context, "🔍 *请输入关键词搜索*")
-    elif text == "ℹ️ 帮助": 
-        help_text = (
-            "📖 *私人云盘使用说明*\n\n"
-            "1️⃣ *直接上传*：发送文件、图片、视频即可存入云端。\n"
-            "2️⃣ *远程转存*：发送 HTTP 链接，机器人自动下载并存储。\n"
-            "3️⃣ *剪贴板*：发送纯文字，自动存为 `.txt` 笔记。\n"
-            "4️⃣ *自动归档*：所有文件自动按 `年-月/` 文件夹分类。\n"
-            "5️⃣ *取件码*：支持为单个文件设置专属取件密码。\n\n"
-            "👤 *管理员指令*：\n"
-            "`/setpwd [新密码]` - 修改全局访问密码"
-        )
-        await update_view(update, context, help_text)
-    elif text.startswith("http"):
+    if text.startswith("http"):
         await handle_url_upload(update, context, text)
     else:
         # 默认作为搜索处理
@@ -233,16 +198,6 @@ async def handle_url_upload(update, context, url):
     except Exception as e:
         await update_view(update, context, f"❌ 远程转存失败: {e}")
 
-async def handle_note_upload(update, context, text):
-    folder = datetime.now(BJ_TZ).strftime('%Y-%m')
-    name = f"note_{datetime.now(BJ_TZ).strftime('%d_%H%M%S')}.txt"
-    full_path = f"{folder}/{name}"
-    try:
-        supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=full_path, file=text.encode('utf-8'), file_options={'upsert': 'true'})
-        await update_view(update, context, f"📝 *已存为笔记*：`{name}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📂 查看详情", callback_data=f"lk:{get_short_id(full_path)}")]]))
-    except Exception as e:
-        await update_view(update, context, f"❌ 笔记保存失败: {e}")
-
 async def send_file_list(update, context, page=0, search_query=None):
     try:
         files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
@@ -252,14 +207,13 @@ async def send_file_list(update, context, page=0, search_query=None):
 
         total_size = sum(f.get('metadata', {}).get('size', 0) for f in real_files)
         percent = (total_size / (1024 * 1024 * 1024)) * 100
-        warning = "⚠️ *空间告急！*" if percent > 80 else ""
-        storage_info = f"📊 *存储统计*：{format_size(total_size)} / 1 GB ({percent:.1f}%) {warning}"
+        storage_info = f"📊 *存储统计*：{format_size(total_size)} / 1 GB ({percent:.1f}%)"
 
         if not real_files:
             await update_view(update, context, f"{storage_info}\n\n📭 *暂无文件*")
             return
 
-        page_size = 6
+        page_size = 8
         total_pages = (len(real_files) + page_size - 1) // page_size
         page = max(0, min(page, total_pages - 1))
         
@@ -267,15 +221,14 @@ async def send_file_list(update, context, page=0, search_query=None):
         kb = []
         for f in real_files[page*page_size : (page+1)*page_size]:
             name = f['name']
-            icon = get_file_icon(name)
-            kb.append([InlineKeyboardButton(f"{icon} {name[:25]}", callback_data=f"lk:{get_short_id(name)}")])
+            kb.append([InlineKeyboardButton(name[:35], callback_data=f"lk:{get_short_id(name)}")])
 
         nav = []
-        if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data=f"pg:{page-1}"))
-        nav.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
-        if page < total_pages - 1: nav.append(InlineKeyboardButton("➡️", callback_data=f"pg:{page+1}"))
-        kb.append(nav)
-        kb.append([InlineKeyboardButton("🔄 刷新", callback_data=f"pg:{page}"), InlineKeyboardButton("🧹 批量删除", callback_data="batch_del")])
+        if page > 0: nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"pg:{page-1}"))
+        if page < total_pages - 1: nav.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"pg:{page+1}"))
+        if nav: kb.append(nav)
+        
+        kb.append([InlineKeyboardButton("🔄 刷新列表", callback_data=f"pg:{page}"), InlineKeyboardButton("🧹 批量删除", callback_data="batch_del")])
 
         await update_view(update, context, text, reply_markup=InlineKeyboardMarkup(kb))
     except Exception as e: logging.error(f"List error: {e}")
@@ -321,16 +274,16 @@ async def show_file_detail(update, context, short_id):
         
         text = (
             f"✅ *文件详情*\n\n"
-            f"📄 *文件名*：`{name}`\n"
-            f"⚖️ *大小*：`{size}`\n"
-            f"📅 *上传时间*：`{created_str}`\n"
-            f"📈 *下载次数*：`{count}` 次\n"
-            f"🔐 *取件码*：`{f_pwd}`\n\n"
+            f"📄 文件名：`{name}`\n"
+            f"⚖️ 大小：`{size}`\n"
+            f"📅 上传时间：`{created_str}`\n"
+            f"📈 下载次数：`{count}` 次\n"
+            f"🔐 取件码：`{f_pwd}`\n\n"
             f"🔗 [点击下载]({url})\n\n"
             f"链接：`{url}`"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏳ 临时链接(1h)", callback_data=f"ts:{short_id}"), InlineKeyboardButton("🔐 设取件码", callback_data=f"sp:{short_id}")],
+            [InlineKeyboardButton("⏳ 临时链接", callback_data=f"ts:{short_id}"), InlineKeyboardButton("🔐 设取件码", callback_data=f"sp:{short_id}")],
             [InlineKeyboardButton("✏️ 重命名", callback_data=f"rn:{short_id}"), InlineKeyboardButton("🗑️ 删除", callback_data=f"cd:{short_id}")],
             [InlineKeyboardButton("🔙 返回列表", callback_data="list_files")]
         ])
@@ -371,7 +324,7 @@ async def start_rename(update, context, short_id):
     name = callback_map.get(short_id)
     uid = update.effective_user.id
     user_data[uid].update({'waiting_rename': True, 'old_name': name})
-    await update_view(update, context, f"✏️ *重命名*：`{name}`\n\n请输入新名称（支持路径如 `文档/1.pdf`）：")
+    await update_view(update, context, f"✏️ *重命名*：`{name}`\n\n请输入新名称：")
 
 async def do_rename(update, context, new_name):
     uid = update.effective_user.id
@@ -452,6 +405,7 @@ def main():
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), HealthCheckHandler).serve_forever(), daemon=True).start()
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("list", lambda u, c: send_file_list(u, c)))
     app.add_handler(CommandHandler("setpwd", set_pwd_command))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
