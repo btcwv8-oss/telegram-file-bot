@@ -43,8 +43,7 @@ def load_data():
     default = {
         'password': 'btcwv', 
         'verified_users': [], 
-        'file_stats': {}, 
-        'file_pwd': {}
+        'file_stats': {}
     }
     try:
         if os.path.exists(DATA_FILE):
@@ -109,9 +108,20 @@ def verify_user(uid):
 # ========== 辅助函数 ==========
 def format_size(size_bytes):
     if not size_bytes: return "0 B"
+    size_bytes = int(size_bytes)
     if size_bytes < 1024: return f"{size_bytes} B"
     elif size_bytes < 1024 * 1024: return f"{size_bytes / 1024:.1f} KB"
     else: return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+def get_short_url(long_url):
+    try:
+        # 使用 tinyurl 免费 API
+        api_url = f"http://tinyurl.com/api-create.php?url={long_url}"
+        res = requests.get(api_url, timeout=5)
+        if res.status_code == 200:
+            return res.text
+    except Exception: pass
+    return long_url
 
 def generate_qr(url):
     qr = qrcode.QRCode(version=1, box_size=10, border=4)
@@ -135,7 +145,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = "👋 *你好！我是您的私人云端助手*\n\n发送 /list 查看文件列表\n直接发送文件或链接进行上传"
-    # 移除旧的菜单栏
     new_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
     user_data.setdefault(uid, {})['mid'] = new_msg.message_id
 
@@ -173,16 +182,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await do_rename(update, context, text)
         return
     
-    if user_data.get(uid, {}).get('waiting_file_pwd'):
-        await do_set_file_pwd(update, context, text)
-        return
-
     if not is_verified(uid, update.effective_user): return
 
     if text.startswith("http"):
         await handle_url_upload(update, context, text)
     else:
-        # 默认作为搜索处理
         await send_file_list(update, context, search_query=text)
 
 async def handle_url_upload(update, context, url):
@@ -205,7 +209,7 @@ async def send_file_list(update, context, page=0, search_query=None):
         if search_query:
             real_files = [f for f in real_files if search_query.lower() in f['name'].lower()]
 
-        total_size = sum(f.get('metadata', {}).get('size', 0) for f in real_files)
+        total_size = sum(int(f.get('metadata', {}).get('size') or f.get('size', 0)) for f in real_files)
         percent = (total_size / (1024 * 1024 * 1024)) * 100
         storage_info = f"📊 *存储统计*：{format_size(total_size)} / 1 GB ({percent:.1f}%)"
 
@@ -243,7 +247,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith('cd:'): await confirm_delete(update, context, data[3:])
     elif data.startswith('yd:'): await do_delete(update, context, data[3:])
     elif data.startswith('rn:'): await start_rename(update, context, data[3:])
-    elif data.startswith('sp:'): await start_set_file_pwd(update, context, data[3:])
     elif data.startswith('ts:'): await get_temp_link(update, context, data[3:])
     elif data == 'batch_del': await send_batch_del(update, context)
     elif data.startswith('bs:'): await do_batch_del_single(update, context, data[3:])
@@ -259,7 +262,8 @@ async def show_file_detail(update, context, short_id):
     try:
         files = supabase.storage.from_(SUPABASE_BUCKET_NAME).list()
         file_info = next((f for f in files if f['name'] == name), {})
-        size = format_size(file_info.get('metadata', {}).get('size', 0))
+        raw_size = file_info.get('metadata', {}).get('size') or file_info.get('size', 0)
+        size = format_size(raw_size)
         created = file_info.get('created_at', '')
         if created:
             dt = datetime.fromisoformat(created.replace('Z', '+00:00')).astimezone(BJ_TZ)
@@ -267,57 +271,38 @@ async def show_file_detail(update, context, short_id):
         else: created_str = "未知"
 
         res = supabase.storage.from_(SUPABASE_BUCKET_NAME).get_public_url(name)
-        url = res if isinstance(res, str) else res.get('publicURL', res)
-        qr = generate_qr(url)
+        long_url = res if isinstance(res, str) else res.get('publicURL', res)
+        
+        # 生成短链接以优化微信扫码
+        short_url = get_short_url(long_url)
+        qr = generate_qr(short_url)
         count = data['file_stats'].get(name, 0)
-        f_pwd = data['file_pwd'].get(name, "无")
         
         text = (
             f"✅ *文件详情*\n\n"
             f"📄 文件名：`{name}`\n"
             f"⚖️ 大小：`{size}`\n"
             f"📅 上传时间：`{created_str}`\n"
-            f"📈 下载次数：`{count}` 次\n"
-            f"🔐 取件码：`{f_pwd}`\n\n"
-            f"🔗 [点击下载]({url})\n\n"
-            f"链接：`{url}`"
+            f"📈 下载次数：`{count}` 次\n\n"
+            f"🔗 [点击下载]({short_url})\n\n"
+            f"短链接：`{short_url}`\n"
+            f"（微信扫码后请点击右上角在浏览器打开）"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏳ 临时链接", callback_data=f"ts:{short_id}"), InlineKeyboardButton("🔐 设取件码", callback_data=f"sp:{short_id}")],
-            [InlineKeyboardButton("✏️ 重命名", callback_data=f"rn:{short_id}"), InlineKeyboardButton("🗑️ 删除", callback_data=f"cd:{short_id}")],
-            [InlineKeyboardButton("🔙 返回列表", callback_data="list_files")]
+            [InlineKeyboardButton("⏳ 临时链接", callback_data=f"ts:{short_id}"), InlineKeyboardButton("✏️ 重命名", callback_data=f"rn:{short_id}")],
+            [InlineKeyboardButton("🗑️ 删除", callback_data=f"cd:{short_id}"), InlineKeyboardButton("🔙 返回列表", callback_data="list_files")]
         ])
         await update_view(update, context, text, reply_markup=kb, photo=qr)
     except Exception as e: await update_view(update, context, f"❌ 获取详情失败: {e}")
-
-async def start_set_file_pwd(update, context, short_id):
-    name = callback_map.get(short_id)
-    uid = update.effective_user.id
-    user_data[uid].update({'waiting_file_pwd': True, 'target_file': name})
-    await update_view(update, context, f"🔐 *设置取件码*：`{name}`\n\n请输入新取件码（发送 /none 清除，/cancel 取消）：")
-
-async def do_set_file_pwd(update, context, pwd):
-    uid = update.effective_user.id
-    name = user_data[uid].get('target_file')
-    user_data[uid]['waiting_file_pwd'] = False
-    if pwd.lower() == '/cancel':
-        await show_file_detail(update, context, get_short_id(name))
-        return
-    data = load_data()
-    if pwd.lower() == '/none':
-        if name in data['file_pwd']: del data['file_pwd'][name]
-    else:
-        data['file_pwd'][name] = pwd
-    save_data(data)
-    await show_file_detail(update, context, get_short_id(name))
 
 async def get_temp_link(update, context, short_id):
     name = callback_map.get(short_id)
     try:
         res = supabase.storage.from_(SUPABASE_BUCKET_NAME).create_signed_url(name, 3600)
         temp_url = res.get('signedURL', res) if isinstance(res, dict) else res
-        await update.callback_query.answer("✅ 已生成 1 小时有效链接", show_alert=True)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⏳ *临时分享链接 (1小时有效)*：\n\n`{temp_url}`", parse_mode='Markdown')
+        short_temp_url = get_short_url(temp_url)
+        await update.callback_query.answer("✅ 已生成 1 小时有效短链接", show_alert=True)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⏳ *临时分享链接 (1小时有效)*：\n\n`{short_temp_url}`", parse_mode='Markdown')
     except Exception as e: await update.callback_query.answer(f"❌ 生成失败: {e}", show_alert=True)
 
 async def start_rename(update, context, short_id):
@@ -339,7 +324,6 @@ async def do_rename(update, context, new_name):
         supabase.storage.from_(SUPABASE_BUCKET_NAME).remove([old_name])
         data = load_data()
         if old_name in data['file_stats']: data['file_stats'][new_name] = data['file_stats'].pop(old_name)
-        if old_name in data['file_pwd']: data['file_pwd'][new_name] = data['file_pwd'].pop(old_name)
         save_data(data)
         await send_file_list(update, context)
     except Exception: await update_view(update, context, "❌ 重命名失败")
@@ -355,7 +339,6 @@ async def do_delete(update, context, short_id):
         supabase.storage.from_(SUPABASE_BUCKET_NAME).remove([name])
         data = load_data()
         if name in data['file_stats']: del data['file_stats'][name]
-        if name in data['file_pwd']: del data['file_pwd'][name]
         save_data(data)
     await send_file_list(update, context)
 
