@@ -48,8 +48,11 @@ def save_remote_config(config):
     except Exception as e:
         logging.error(f"Save config error: {e}")
 
-# ========== 微信中转引导页 HTML (增强 APK 下载支持) ==========
-GUIDE_HTML = """
+# ========== 微信中转引导页 HTML (精简链接版本) ==========
+# 这里的 SUPABASE_BASE_URL 会在生成 HTML 时注入
+SUPABASE_BASE_URL = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET_NAME}"
+
+GUIDE_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
@@ -78,27 +81,26 @@ GUIDE_HTML = """
     </div>
     <div class="footer">Powered by Resource Assistant</div>
     <script>
+        var baseUrl = "{base_url}";
         function getParam(name) {{
             return new URLSearchParams(window.location.search).get(name);
         }}
         try {{
-            var rawData = getParam('s');
-            if (rawData) {{
-                var decoded = JSON.parse(atob(rawData));
-                var url = decoded.u;
-                var name = decoded.n;
+            var encodedName = getParam('s');
+            if (encodedName) {{
+                var name = atob(encodedName);
+                var url = baseUrl + "/" + encodeURIComponent(name);
                 
                 var btn = document.getElementById('downloadBtn');
                 btn.href = url;
-                btn.setAttribute('download', name); // 强制设置下载文件名
-                document.getElementById('fileName').innerText = name || '文件准备就绪';
+                btn.setAttribute('download', name);
+                document.getElementById('fileName').innerText = name;
                 
                 var ua = navigator.userAgent.toLowerCase();
                 if (ua.match(/MicroMessenger/i) == "micromessenger") {{
                     document.getElementById('weixinTip').style.display = 'block';
                 }} else {{
-                    // 针对 APK 优化：稍作延迟触发，增加成功率
-                    setTimeout(function(){ window.location.href = url; }, 800);
+                    setTimeout(function(){{ window.location.href = url; }}, 800);
                 }}
             }}
         }} catch(e) {{ console.error("Parse error"); }}
@@ -111,7 +113,8 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/v/s"):
             self.send_response(200); self.send_header("Content-type", "text/html"); self.end_headers()
-            self.wfile.write(GUIDE_HTML.encode())
+            html = GUIDE_HTML_TEMPLATE.replace("{base_url}", SUPABASE_BASE_URL)
+            self.wfile.write(html.encode())
         else:
             self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
     def log_message(self, *args): pass
@@ -254,9 +257,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     try:
-        raw_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET_NAME}/{name}"
-        payload = base64.b64encode(json.dumps({"u": raw_url, "n": name}).encode()).decode()
-        dl_url = f"{RENDER_EXTERNAL_URL}/v/s?s={payload}"
+        # 极致精简：只加密文件名
+        encoded_name = base64.b64encode(name.encode()).decode()
+        dl_url = f"{RENDER_EXTERNAL_URL}/v/s?s={encoded_name}"
             
         qr = qrcode.make(dl_url); buf = BytesIO(); qr.save(buf, format='PNG'); buf.seek(0)
         text = f"`{name}`\n\n🔗 [点击下载]({dl_url})\n\n`{dl_url}`"
@@ -296,10 +299,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         tg_file = await context.bot.get_file(file.file_id); f_path = await tg_file.download_to_drive()
         mtype, _ = mimetypes.guess_type(name)
-        # 针对 APK 强制设置 MIME 类型
-        if name.lower().endswith('.apk'):
-            mtype = 'application/vnd.android.package-archive'
-            
+        if name.lower().endswith('.apk'): mtype = 'application/vnd.android.package-archive'
         with open(f_path, 'rb') as f:
             supabase.storage.from_(SUPABASE_BUCKET_NAME).upload(path=name, file=f.read(), file_options={'upsert':'true', 'content-type': mtype or 'application/octet-stream'})
         await safe_delete(msg); await show_detail(update, context, name)
