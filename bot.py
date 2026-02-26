@@ -6,6 +6,7 @@ import threading
 import mimetypes
 import urllib.parse
 import json
+import base64
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -19,7 +20,6 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SUPABASE_BUCKET_NAME = "public-files"
-# 硬编码服务地址，确保微信中转功能直接可用
 RENDER_EXTERNAL_URL = "https://telegram-file-bot-free.onrender.com"
 BJ_TZ = timezone(timedelta(hours=8))
 
@@ -48,14 +48,14 @@ def save_remote_config(config):
     except Exception as e:
         logging.error(f"Save config error: {e}")
 
-# ========== 微信中转引导页 HTML ==========
+# ========== 微信中转引导页 HTML (支持 Base64 解密) ==========
 GUIDE_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>文件下载</title>
+    <title>资源查看</title>
     <style>
         body {{ font-family: -apple-system, sans-serif; text-align: center; padding-top: 50px; color: #333; background: #f5f5f5; }}
         .weixin-tip {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); color: #fff; z-index: 999; }}
@@ -67,30 +67,39 @@ GUIDE_HTML = """
 </head>
 <body>
     <div id="weixinTip" class="weixin-tip">
-        <p style="margin-top: 120px; font-size: 20px; font-weight: bold; line-height: 1.6;">微信内无法直接下载<br>请点击右上角 <span style="font-size: 24px;">•••</span><br>选择“在浏览器中打开”</p>
+        <p style="margin-top: 120px; font-size: 20px; font-weight: bold; line-height: 1.6;">资源受限<br>请点击右上角 <span style="font-size: 24px;">•••</span><br>选择“在浏览器中打开”</p>
         <img src="https://img.alicdn.com/tfs/TB19S_4QXXXXXbSXXXXXXXXXXXX-1125-1125.png" alt="引导图">
     </div>
     <div class="card" id="normalView">
-        <h2 style="margin-bottom: 10px;">文件准备就绪</h2>
+        <h2 style="margin-bottom: 10px;">资源已就绪</h2>
         <p id="fileName" style="word-break: break-all; color: #666;"></p>
-        <a id="downloadBtn" class="btn" href="#">立即开始下载</a>
-        <p style="font-size: 13px; color: #ff4d4f; margin-top: 15px;">若未自动弹出下载，请点击上方按钮</p>
+        <a id="downloadBtn" class="btn" href="#">立即获取资源</a>
+        <p style="font-size: 13px; color: #ff4d4f; margin-top: 15px;">若未自动弹出，请点击上方按钮</p>
     </div>
-    <div class="footer">Powered by File Bot</div>
+    <div class="footer">Powered by Resource Assistant</div>
     <script>
-        var params = new URLSearchParams(window.location.search);
-        var url = params.get('url');
-        var name = params.get('name');
-        if (url) {{
-            document.getElementById('downloadBtn').href = url;
-            document.getElementById('fileName').innerText = name || '未知文件';
-            var ua = navigator.userAgent.toLowerCase();
-            if (ua.match(/MicroMessenger/i) == "micromessenger") {{
-                document.getElementById('weixinTip').style.display = 'block';
-            }} else {{
-                setTimeout(function(){ window.location.href = url; }, 500);
-            }}
+        function getParam(name) {{
+            return new URLSearchParams(window.location.search).get(name);
         }}
+        try {{
+            // 解密混淆的参数
+            var rawData = getParam('s');
+            if (rawData) {{
+                var decoded = JSON.parse(atob(rawData));
+                var url = decoded.u;
+                var name = decoded.n;
+                
+                document.getElementById('downloadBtn').href = url;
+                document.getElementById('fileName').innerText = name || '文件准备就绪';
+                
+                var ua = navigator.userAgent.toLowerCase();
+                if (ua.match(/MicroMessenger/i) == "micromessenger") {{
+                    document.getElementById('weixinTip').style.display = 'block';
+                }} else {{
+                    setTimeout(function(){ window.location.href = url; }, 500);
+                }}
+            }}
+        }} catch(e) {{ console.error("Parse error"); }}
     </script>
 </body>
 </html>
@@ -98,7 +107,8 @@ GUIDE_HTML = """
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path.startswith("/dl"):
+        # 混淆路径，不再使用 /dl
+        if self.path.startswith("/v/s"):
             self.send_response(200); self.send_header("Content-type", "text/html"); self.end_headers()
             self.wfile.write(GUIDE_HTML.encode())
         else:
@@ -244,7 +254,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, name):
     try:
         raw_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET_NAME}/{name}"
-        dl_url = f"{RENDER_EXTERNAL_URL}/dl?name={urllib.parse.quote(name)}&url={urllib.parse.quote(raw_url)}"
+        # 混淆参数：将 URL 和文件名封装成 Base64 字符串
+        payload = base64.b64encode(json.dumps({"u": raw_url, "n": name}).encode()).decode()
+        # 混淆路径：/v/s
+        dl_url = f"{RENDER_EXTERNAL_URL}/v/s?s={payload}"
             
         qr = qrcode.make(dl_url); buf = BytesIO(); qr.save(buf, format='PNG'); buf.seek(0)
         text = f"`{name}`\n\n🔗 [点击下载]({dl_url})\n\n`{dl_url}`"
@@ -261,7 +274,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in user_states: user_states[user_id] = {"auth": False}
     state = user_states[user_id]
     
-    # 1. 优先处理验证逻辑
     if not state.get("auth"):
         config = get_remote_config()
         if msg.text and msg.text.strip() == config.get("password", DEFAULT_PWD):
@@ -269,19 +281,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else: await send_or_edit(update, "*密码错误，请重新输入*")
         return
 
-    # 2. 已验证，处理正在进行的动作
     if "action" in state:
         if state["action"] == "rename":
             new = msg.text.strip() + os.path.splitext(state["old_name"])[1]
             try: supabase.storage.from_(SUPABASE_BUCKET_NAME).move(state["old_name"], new); await show_detail(update, context, new)
             except: pass
         elif state["action"] == "pwd":
-            new_pwd = msg.text.strip()
-            save_remote_config({"password": new_pwd})
-            await start(update, context)
+            new_pwd = msg.text.strip(); save_remote_config({"password": new_pwd}); await start(update, context)
         state.pop("action", None); await safe_delete(msg); return
     
-    # 3. 处理上传
     file = msg.document or (msg.photo[-1] if msg.photo else None) or msg.video
     if not file: await safe_delete(msg); return
         
