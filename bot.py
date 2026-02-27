@@ -62,50 +62,81 @@ GUIDE_HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>资源查看</title>
+    <title>文件获取中心</title>
     <style>
-        body {{ font-family: -apple-system, sans-serif; text-align: center; padding-top: 50px; color: #333; background: #f5f5f5; }}
-        .weixin-tip {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); color: #fff; z-index: 999; }}
-        .weixin-tip img {{ width: 100%; max-width: 250px; position: absolute; right: 20px; top: 10px; }}
-        .card {{ background: #fff; margin: 20px; padding: 30px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
-        .btn {{ display: inline-block; padding: 15px 30px; background: #0088cc; color: #fff; text-decoration: none; border-radius: 10px; font-weight: bold; margin-top: 20px; }}
-        .footer {{ font-size: 12px; color: #999; margin-top: 50px; }}
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body { font-family: -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif; background-color: #f0f2f5; margin: 0; display: flex; align-items: center; justify-content: center; min-height: 100vh; color: #1d1d1f; }
+        .container { width: 90%; max-width: 400px; text-align: center; }
+        .card { background: #ffffff; border-radius: 24px; padding: 40px 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); transition: transform 0.3s ease; }
+        .icon-box { width: 64px; height: 64px; background: #007aff; border-radius: 18px; margin: 0 auto 24px; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 20px rgba(0,122,255,0.3); }
+        .icon-box svg { width: 32px; height: 32px; fill: white; }
+        h2 { font-size: 22px; font-weight: 600; margin: 0 0 12px; color: #000; }
+        #fileName { font-size: 15px; color: #86868b; word-break: break-all; margin-bottom: 30px; line-height: 1.5; padding: 0 10px; }
+        .status-tag { display: inline-flex; align-items: center; background: #e8f2ff; color: #007aff; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 500; margin-bottom: 20px; }
+        .status-tag .dot { width: 6px; height: 6px; background: #007aff; border-radius: 50%; margin-right: 8px; animation: blink 1s infinite; }
+        @keyframes blink { 0% { opacity: 0.2; } 50% { opacity: 1; } 100% { opacity: 0.2; } }
+        .btn { display: block; width: 100%; padding: 16px; background: #007aff; color: #fff; text-decoration: none; border-radius: 14px; font-size: 16px; font-weight: 600; transition: all 0.2s; box-shadow: 0 4px 15px rgba(0,122,255,0.2); }
+        .btn:active { transform: scale(0.98); opacity: 0.9; }
+        .hint { font-size: 13px; color: #a1a1a6; margin-top: 20px; }
+        .weixin-tip { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); color: #fff; z-index: 1000; backdrop-filter: blur(8px); }
+        .weixin-tip .content { position: absolute; right: 30px; top: 20px; text-align: right; }
+        .weixin-tip .arrow { width: 60px; margin-bottom: 10px; transform: rotate(-10deg); filter: drop-shadow(0 0 10px #007aff); }
+        .weixin-tip p { font-size: 18px; font-weight: 500; line-height: 1.6; margin: 0; }
+        .weixin-tip span { color: #007aff; font-weight: bold; }
     </style>
 </head>
 <body>
     <div id="weixinTip" class="weixin-tip">
-        <p style="margin-top: 120px; font-size: 20px; font-weight: bold; line-height: 1.6;">资源受限<br>请点击右上角 <span style="font-size: 24px;">•••</span><br>选择“在浏览器中打开”</p>
-        <img src="https://img.alicdn.com/tfs/TB19S_4QXXXXXbSXXXXXXXXXXXX-1125-1125.png" alt="引导图">
+        <div class="content">
+            <img src="https://img.alicdn.com/tfs/TB19S_4QXXXXXbSXXXXXXXXXXXX-1125-1125.png" class="arrow">
+            <p>请点击右上角 <span>•••</span></p>
+            <p>选择 <span>在浏览器中打开</span></p>
+        </div>
     </div>
-    <div class="card" id="normalView">
-        <h2 style="margin-bottom: 10px;">资源已就绪</h2>
-        <p id="fileName" style="word-break: break-all; color: #666;"></p>
-        <a id="downloadBtn" class="btn" href="#" download>立即获取资源</a>
-        <p style="font-size: 13px; color: #ff4d4f; margin-top: 15px;">若未自动弹出，请点击上方按钮</p>
+    <div class="container">
+        <div class="card">
+            <div class="icon-box">
+                <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+            </div>
+            <div id="statusTag" class="status-tag"><span class="dot"></span>正在准备下载...</div>
+            <h2 id="titleText">资源已就绪</h2>
+            <p id="fileName">加载中...</p>
+            <a id="downloadBtn" class="btn" href="#">立即下载</a>
+            <p class="hint">若未自动弹出，请点击上方按钮</p>
+        </div>
     </div>
-    <div class="footer">Powered by Resource Assistant</div>
     <script>
         var baseUrl = "{base_url}";
-        function getParam(name) {{
-            return new URLSearchParams(window.location.search).get(name);
-        }}
-        try {{
+        function getParam(name) { return new URLSearchParams(window.location.search).get(name); }
+        try {
             var encodedName = getParam('s');
-            if (encodedName) {{
+            if (encodedName) {
                 var name = atob(encodedName);
                 var url = baseUrl + "/" + encodeURIComponent(name);
                 var btn = document.getElementById('downloadBtn');
                 btn.href = url;
                 btn.setAttribute('download', name);
                 document.getElementById('fileName').innerText = name;
+                
                 var ua = navigator.userAgent.toLowerCase();
-                if (ua.match(/MicroMessenger/i) == "micromessenger") {{
+                if (ua.match(/MicroMessenger/i) == "micromessenger") {
                     document.getElementById('weixinTip').style.display = 'block';
-                }} else {{
-                    setTimeout(function(){{ window.location.href = url; }}, 800);
-                }}
-            }}
-        }} catch(e) {{ console.error("Parse error"); }}
+                    document.getElementById('statusTag').innerHTML = '<span class="dot" style="background:#ff9500"></span>等待微信跳转';
+                    document.getElementById('statusTag').style.color = '#ff9500';
+                    document.getElementById('statusTag').style.background = '#fff4e5';
+                } else {
+                    setTimeout(function(){ 
+                        document.getElementById('statusTag').innerHTML = '<span class="dot" style="background:#34c759"></span>正在下载中，请稍等';
+                        document.getElementById('statusTag').style.color = '#34c759';
+                        document.getElementById('statusTag').style.background = '#eafaf1';
+                        window.location.href = url; 
+                    }, 1000);
+                }
+            }
+        } catch(e) { 
+            document.getElementById('titleText').innerText = "解析失败";
+            document.getElementById('fileName').innerText = "链接可能已过期或损坏";
+        }
     </script>
 </body>
 </html>
