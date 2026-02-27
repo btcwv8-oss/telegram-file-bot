@@ -65,19 +65,32 @@ GUIDE_HTML_TEMPLATE = """
     <title>文件获取中心</title>
     <style>
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-        body { font-family: -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif; background-color: #f0f2f5; margin: 0; display: flex; align-items: center; justify-content: center; min-height: 100vh; color: #1d1d1f; }
+        body { font-family: -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif; background-color: #f0f2f5; margin: 0; display: flex; align-items: center; justify-content: center; min-height: 100vh; color: #1d1d1f; transition: background-color 0.3s; }
         .container { width: 90%; max-width: 400px; text-align: center; }
-        .card { background: #ffffff; border-radius: 24px; padding: 40px 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); transition: transform 0.3s ease; }
+        .card { background: #ffffff; border-radius: 24px; padding: 40px 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); transition: all 0.3s; }
         .icon-box { width: 64px; height: 64px; background: #007aff; border-radius: 18px; margin: 0 auto 24px; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 20px rgba(0,122,255,0.3); }
         .icon-box svg { width: 32px; height: 32px; fill: white; }
-        h2 { font-size: 22px; font-weight: 600; margin: 0 0 12px; color: #000; }
-        #fileName { font-size: 15px; color: #86868b; word-break: break-all; margin-bottom: 30px; line-height: 1.5; padding: 0 10px; }
-        .status-tag { display: inline-flex; align-items: center; background: #e8f2ff; color: #007aff; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 500; margin-bottom: 20px; }
+        h2 { font-size: 22px; font-weight: 600; margin: 0 0 12px; color: #000; transition: color 0.3s; }
+        #fileName { font-size: 15px; color: #86868b; word-break: break-all; margin-bottom: 30px; line-height: 1.5; padding: 0 10px; transition: color 0.3s; }
+        .status-tag { display: inline-flex; align-items: center; background: #e8f2ff; color: #007aff; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 500; margin-bottom: 20px; transition: all 0.3s; }
         .status-tag .dot { width: 6px; height: 6px; background: #007aff; border-radius: 50%; margin-right: 8px; animation: blink 1s infinite; }
         @keyframes blink { 0% { opacity: 0.2; } 50% { opacity: 1; } 100% { opacity: 0.2; } }
-        .btn { display: block; width: 100%; padding: 16px; background: #007aff; color: #fff; text-decoration: none; border-radius: 14px; font-size: 16px; font-weight: 600; transition: all 0.2s; box-shadow: 0 4px 15px rgba(0,122,255,0.2); }
+        .btn { display: block; width: 100%; padding: 16px; background: #007aff; color: #fff !important; text-decoration: none; border-radius: 14px; font-size: 16px; font-weight: 600; transition: all 0.2s; box-shadow: 0 4px 15px rgba(0,122,255,0.2); }
         .btn:active { transform: scale(0.98); opacity: 0.9; }
-        .hint { font-size: 13px; color: #a1a1a6; margin-top: 20px; }
+        .hint { font-size: 13px; color: #a1a1a6; margin-top: 20px; transition: color 0.3s; }
+        
+        /* 深色模式适配 */
+        @media (prefers-color-scheme: dark) {
+            body { background-color: #121212; color: #f5f5f7; }
+            .card { background: #1c1c1e; box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+            h2 { color: #ffffff; }
+            #fileName { color: #a1a1a6; }
+            .status-tag { background: #2c2c2e; color: #0a84ff; }
+            .status-tag .dot { background: #0a84ff; }
+            .btn { background: #0a84ff; box-shadow: 0 4px 15px rgba(10,132,255,0.3); }
+            .hint { color: #636366; }
+        }
+
         .weixin-tip { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); color: #fff; z-index: 1000; backdrop-filter: blur(8px); }
         .weixin-tip .content { position: absolute; right: 30px; top: 20px; text-align: right; }
         .weixin-tip .arrow { width: 60px; margin-bottom: 10px; transform: rotate(-10deg); filter: drop-shadow(0 0 10px #007aff); }
